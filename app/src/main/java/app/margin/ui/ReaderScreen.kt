@@ -100,6 +100,18 @@ import app.margin.ink.Tool
 import app.margin.pdf.PasswordProtectedException
 import app.margin.pdf.PdfDoc
 import app.margin.pdf.PdfSaver
+import app.margin.pdf.PageTemplate
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -192,8 +204,11 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
         }
     }
 
-    val state = remember(pdf) {
-        pdf?.let { ViewerState(it.pageSizes, density, entry?.lastPage ?: 0, entry?.zoom ?: 1f, entry?.zoomLocked ?: false) }
+    // Adding or deleting pages rebuilds the page layout; [start] carries the view over to it.
+    var pagesVersion by remember(docId) { mutableIntStateOf(0) }
+    val start = remember(docId) { StartView(entry?.lastPage ?: 0, entry?.zoom ?: 1f, entry?.zoomLocked ?: false) }
+    val state = remember(pdf, pagesVersion) {
+        pdf?.let { ViewerState(it.pageSizes, density, start.page, start.zoom, start.locked) }
     }
 
     // First open: remember the page count and save a cover thumbnail for the library.
@@ -224,6 +239,25 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
             hint = null
         }
     }
+    /** Adds or deletes pages in the PDF itself, moves the ink with its pages, then saves. */
+    fun editPages(goTo: Int, edit: suspend (PdfDoc) -> Boolean, moveInk: () -> Unit) {
+        val doc = pdf ?: return
+        val s = state ?: return
+        scope.launch {
+            if (!edit(doc)) {
+                hint = "This file's pages can't be changed"
+                return@launch
+            }
+            moveInk()
+            start.page = goTo.coerceIn(0, doc.pageCount - 1)
+            start.zoom = s.zoom
+            start.locked = s.zoomLocked
+            pagesVersion++
+            library.update(docId) { it.copy(pageCount = doc.pageCount) }
+            saveIntoFile()
+        }
+    }
+
     BackHandler(enabled = panel != null) { panel = null }
     BackHandler(enabled = showPages && panel == null) { showPages = false }
 
@@ -267,8 +301,8 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
                 doc == null || s == null -> Loading(Modifier.align(Alignment.Center))
                 else -> {
                     Box(Modifier.fillMaxSize().graphicsLayer { translationX = shift.toPx() }) {
-                        DocumentViewer(doc, s, ink)
                         key(s) {
+                            DocumentViewer(doc, s, ink)
                             var router by remember { mutableStateOf<InputRouter?>(null) }
                             InkSurface(s, ink, onRouter = { router = it }, onDownAnywhere = {
                                 if (panel != null) {
@@ -310,7 +344,18 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
                 exit = slideOutHorizontally(tween(250, easing = EaseOutSmooth)) { -it } + fadeOut(tween(200)),
             ) {
                 if (doc != null && s != null) {
-                    PagesPanel(doc, s, onPick = { i -> scope.launch { s.animateToPage(i) } }, onClose = { showPages = false })
+                    PagesPanel(
+                        doc, s, pagesVersion,
+                        onPick = { i -> scope.launch { s.animateToPage(i) } },
+                        onClose = { showPages = false },
+                        onAdd = { after, template ->
+                            editPages(goTo = after + 1, edit = { it.insertPage(after, template) }) { ink.onPageInserted(after + 1) }
+                        },
+                        onDelete = { i ->
+                            val goTo = if (i >= doc.pageCount - 1) i - 1 else i
+                            editPages(goTo = goTo, edit = { it.deletePage(i) }) { ink.onPageDeleted(i) }
+                        },
+                    )
                 }
             }
         }
@@ -521,11 +566,21 @@ private fun PagePill(state: ViewerState, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun PagesPanel(doc: PdfDoc, state: ViewerState, onPick: (Int) -> Unit, onClose: () -> Unit) {
+private fun PagesPanel(
+    doc: PdfDoc,
+    state: ViewerState,
+    version: Int,
+    onPick: (Int) -> Unit,
+    onClose: () -> Unit,
+    onAdd: (after: Int, PageTemplate) -> Unit,
+    onDelete: (Int) -> Unit,
+) {
+    var addAfter by remember { mutableStateOf<Int?>(null) }
+    var deleteAt by remember { mutableStateOf<Int?>(null) }
     val c = Margin.colors
     val current by remember(state) { derivedStateOf { state.currentPage } }
     val list = rememberLazyListState(initialFirstVisibleItemIndex = (current - 1).coerceAtLeast(0))
-    val thumbs = remember(doc) {
+    val thumbs = remember(doc, version) {
         object : LruCache<Int, ImageBitmap>(48 * 1024 * 1024) {
             override fun sizeOf(key: Int, value: ImageBitmap) = value.width * value.height * 4
         }
@@ -540,6 +595,7 @@ private fun PagesPanel(doc: PdfDoc, state: ViewerState, onPick: (Int) -> Unit, o
             Text("Pages", color = c.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
             Text(" · ${doc.pageCount}", color = c.textMuted, fontSize = 15.sp)
             Spacer(Modifier.weight(1f))
+            IconBtn(MIcons.Plus, "Add page", { addAfter = current })
             IconBtn(MIcons.Close, "Close pages", onClose)
         }
         LazyColumn(
@@ -549,16 +605,51 @@ private fun PagesPanel(doc: PdfDoc, state: ViewerState, onPick: (Int) -> Unit, o
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            items(doc.pageCount, key = { it }) { i ->
-                PageThumb(doc, i, thumbs, selected = i == current, onClick = { onPick(i) })
+            items(doc.pageCount, key = { "$version-$it" }) { i ->
+                PageThumb(
+                    doc, i, thumbs, selected = i == current, onClick = { onPick(i) },
+                    onAddAfter = { addAfter = i },
+                    onDelete = if (doc.pageCount > 1) ({ deleteAt = i }) else null,
+                )
             }
         }
     }
+    addAfter?.let { after ->
+        AddPageDialog(after, onAdd = { t ->
+            addAfter = null
+            onAdd(after, t)
+        }, onDismiss = { addAfter = null })
+    }
+    deleteAt?.let { i ->
+        AlertDialog(
+            onDismissRequest = { deleteAt = null },
+            containerColor = c.surface,
+            title = { Text("Delete page ${i + 1}?", color = c.text, fontWeight = FontWeight.SemiBold) },
+            text = { Text("The page and any ink on it are removed from the PDF. You can still restore the original file from the library.", color = c.textMuted) },
+            confirmButton = {
+                TextButton(onClick = {
+                    deleteAt = null
+                    onDelete(i)
+                }) { Text("Delete", color = c.danger) }
+            },
+            dismissButton = { TextButton(onClick = { deleteAt = null }) { Text("Cancel") } },
+        )
+    }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun PageThumb(doc: PdfDoc, index: Int, cache: LruCache<Int, ImageBitmap>, selected: Boolean, onClick: () -> Unit) {
+private fun PageThumb(
+    doc: PdfDoc,
+    index: Int,
+    cache: LruCache<Int, ImageBitmap>,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onAddAfter: () -> Unit,
+    onDelete: (() -> Unit)?,
+) {
     val c = Margin.colors
+    var menu by remember { mutableStateOf(false) }
     val size = doc.pageSizes[index]
     var image by remember(index) { mutableStateOf(cache.get(index)) }
     LaunchedEffect(index) {
@@ -580,9 +671,29 @@ private fun PageThumb(doc: PdfDoc, index: Int, cache: LruCache<Int, ImageBitmap>
                 .clip(shape)
                 .background(Color.White)
                 .border(2.5.dp, c.accent.copy(alpha = ring), shape)
-                .clickable(onClickLabel = "Go to page ${index + 1}", onClick = onClick),
+                .combinedClickable(
+                    onClickLabel = "Go to page ${index + 1}",
+                    onLongClickLabel = "Page options",
+                    onClick = onClick,
+                    onLongClick = { menu = true },
+                )
+                .semantics { contentDescription = "Page ${index + 1}" },
         ) {
             image?.let { Image(it, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds) }
+            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                DropdownMenuItem(
+                    text = { Text("Add page after") },
+                    leadingIcon = { Icon(MIcons.Plus, contentDescription = null) },
+                    onClick = { menu = false; onAddAfter() },
+                )
+                if (onDelete != null) {
+                    DropdownMenuItem(
+                        text = { Text("Delete page", color = c.danger) },
+                        leadingIcon = { Icon(MIcons.Trash, contentDescription = null, tint = c.danger) },
+                        onClick = { menu = false; onDelete() },
+                    )
+                }
+            }
         }
         Text(
             "${index + 1}",
@@ -592,6 +703,73 @@ private fun PageThumb(doc: PdfDoc, index: Int, cache: LruCache<Int, ImageBitmap>
         )
     }
 }
+
+/** Picks the look of a new page: blank, lined, grid or dotted. */
+@Composable
+private fun AddPageDialog(after: Int, onAdd: (PageTemplate) -> Unit, onDismiss: () -> Unit) {
+    val c = Margin.colors
+    var pick by remember { mutableStateOf(PageTemplate.Lined) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = c.surface,
+        title = { Text("Add page after page ${after + 1}", color = c.text, fontWeight = FontWeight.SemiBold) },
+        text = {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                PageTemplate.entries.forEach { t ->
+                    val on = t == pick
+                    val shape = RoundedCornerShape(12.dp)
+                    Column(
+                        Modifier.clip(shape).background(if (on) c.accentSoft else Color.Transparent)
+                            .border(1.5.dp, if (on) c.accent else c.line, shape)
+                            .selectable(selected = on, role = Role.RadioButton) { pick = t }
+                            .padding(10.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        TemplatePreview(t, Modifier.size(52.dp, 70.dp))
+                        Text(t.name, fontSize = 12.sp, color = if (on) c.text else c.textMuted)
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onAdd(pick) }) { Text("Add page") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun TemplatePreview(t: PageTemplate, modifier: Modifier) {
+    Canvas(modifier.shadow(1.dp, RoundedCornerShape(3.dp)).background(Color.White, RoundedCornerShape(3.dp))) {
+        val step = size.width / 7f
+        when (t) {
+            PageTemplate.Blank -> Unit
+            PageTemplate.Lined -> {
+                var y = step * 1.6f
+                while (y < size.height - step * 0.5f) {
+                    drawLine(Color(0xFFC2D1F0), Offset(step * 0.6f, y), Offset(size.width - step * 0.6f, y), 1.dp.toPx())
+                    y += step
+                }
+            }
+            PageTemplate.Grid -> {
+                var x = step
+                while (x < size.width) { drawLine(Color(0xFFDDDAD5), Offset(x, 0f), Offset(x, size.height), 1f); x += step }
+                var y = step
+                while (y < size.height) { drawLine(Color(0xFFDDDAD5), Offset(0f, y), Offset(size.width, y), 1f); y += step }
+            }
+            PageTemplate.Dotted -> {
+                var y = step
+                while (y < size.height) {
+                    var x = step
+                    while (x < size.width) { drawCircle(Color(0xFFB8B3AC), 1.2.dp.toPx(), Offset(x, y)); x += step }
+                    y += step
+                }
+            }
+        }
+    }
+}
+
+/** The view to restore after the page layout is rebuilt. */
+private class StartView(var page: Int, var zoom: Float, var locked: Boolean)
 
 @Composable
 private fun Loading(modifier: Modifier) {

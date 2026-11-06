@@ -38,14 +38,22 @@ class PasswordProtectedException : IOException("This PDF is password-protected."
 /** Ink that Margin wrote into the PDF earlier: points (x, y pairs, page points) and look. */
 class SavedInk(val page: Int, val points: FloatArray, val color: Int, val width: Float, val opacity: Float, val subject: String?)
 
+/** What a newly added page looks like. */
+enum class PageTemplate { Blank, Lined, Grid, Dotted }
+
 class PdfDoc private constructor(
     private val work: File,
     private val doc: Document,
-    val pageSizes: List<PageSize>,
-    private val origins: List<Pair<Float, Float>>,
+    sizes: List<PageSize>,
+    origins: List<Pair<Float, Float>>,
     /** Margin's ink annotations found in the file when it was opened. */
     val savedInk: List<SavedInk>,
 ) : Closeable {
+
+    /** Page sizes (PDF points), in page order. Changes when pages are added or deleted. */
+    @Volatile var pageSizes: List<PageSize> = sizes
+        private set
+    private var origins: List<Pair<Float, Float>> = origins
 
     /** Pages that have (or had) Margin ink annotations; each save rewrites these. */
     private val inkedPages = savedInk.mapTo(HashSet()) { it.page }
@@ -71,7 +79,7 @@ class PdfDoc private constructor(
      */
     suspend fun render(index: Int, scale: Float, region: Rect? = null): Bitmap? = withContext(Mupdf.dispatcher) {
         ensureActive()
-        if (closed) return@withContext null
+        if (closed || index !in pageSizes.indices) return@withContext null
         val size = pageSizes[index]
         val full = Rect(0, 0, max(1, (size.width * scale).roundToInt()), max(1, (size.height * scale).roundToInt()))
         val r = region?.let { Rect(it).apply { if (!intersect(full)) return@withContext null } } ?: full
@@ -99,7 +107,99 @@ class PdfDoc private constructor(
 
     /** Small preview of a page, [widthPx] wide. */
     suspend fun thumbnail(index: Int, widthPx: Int): Bitmap? =
-        render(index, widthPx / pageSizes[index].width)
+        pageSizes.getOrNull(index)?.let { render(index, widthPx / it.width) }
+
+    /**
+     * Adds a [template] page after page [after], the same size as that page.
+     * Returns false if this isn't an editable PDF.
+     */
+    suspend fun insertPage(after: Int, template: PageTemplate): Boolean = withContext(Mupdf.dispatcher) {
+        val pdf = doc as? PDFDocument ?: return@withContext false
+        val ref = pageSizes.getOrNull(after) ?: pageSizes.last()
+        val pageObj = pdf.addPage(
+            com.artifex.mupdf.fitz.Rect(0f, 0f, ref.width, ref.height), 0, pdf.newDictionary(),
+            templateContent(template, ref.width, ref.height),
+        )
+        dropLoadedPages()
+        pdf.insertPage(after + 1, pageObj)
+        // Ink annotations belong to their page, so pages after the new one moved down by one.
+        val moved = inkedPages.map { if (it > after) it + 1 else it }
+        inkedPages.clear()
+        inkedPages.addAll(moved)
+        reloadPageInfo()
+        true
+    }
+
+    /** Deletes page [index] (never the last remaining page). Returns false if it can't. */
+    suspend fun deletePage(index: Int): Boolean = withContext(Mupdf.dispatcher) {
+        val pdf = doc as? PDFDocument ?: return@withContext false
+        if (pageCount <= 1 || index !in pageSizes.indices) return@withContext false
+        dropLoadedPages()
+        pdf.deletePage(index)
+        val moved = inkedPages.filter { it != index }.map { if (it > index) it - 1 else it }
+        inkedPages.clear()
+        inkedPages.addAll(moved)
+        reloadPageInfo()
+        true
+    }
+
+    private fun dropLoadedPages() {
+        pages.values.forEach { it.destroy() }
+        pages.clear()
+    }
+
+    private fun reloadPageInfo() {
+        val count = doc.countPages()
+        val sizes = ArrayList<PageSize>(count)
+        val orig = ArrayList<Pair<Float, Float>>(count)
+        for (i in 0 until count) {
+            val b = page(i).bounds
+            sizes += PageSize(max(1f, b.x1 - b.x0), max(1f, b.y1 - b.y0))
+            orig += b.x0 to b.y0
+        }
+        origins = orig
+        pageSizes = sizes
+    }
+
+    /** The drawing commands for a new page (PDF coordinates: origin bottom-left). */
+    private fun templateContent(t: PageTemplate, w: Float, h: Float): String = buildString {
+        when (t) {
+            PageTemplate.Blank -> Unit
+            PageTemplate.Lined -> {
+                append("0.76 0.82 0.94 RG 0.6 w\n")
+                var y = h - 72f
+                while (y > 40f) {
+                    append("36 $y m ${w - 36f} $y l S\n")
+                    y -= 24f
+                }
+            }
+            PageTemplate.Grid -> {
+                append("0.87 0.86 0.84 RG 0.4 w\n")
+                var x = 20f
+                while (x < w) {
+                    append("$x 0 m $x $h l S\n")
+                    x += 20f
+                }
+                var y = 20f
+                while (y < h) {
+                    append("0 $y m $w $y l S\n")
+                    y += 20f
+                }
+            }
+            PageTemplate.Dotted -> {
+                append("0.72 0.70 0.67 rg\n")
+                var y = 20f
+                while (y < h) {
+                    var x = 20f
+                    while (x < w) {
+                        append("${x - 0.7f} ${y - 0.7f} 1.4 1.4 re f\n")
+                        x += 20f
+                    }
+                    y += 20f
+                }
+            }
+        }
+    }
 
     override fun close() {
         closed = true

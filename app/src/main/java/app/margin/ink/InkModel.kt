@@ -114,6 +114,11 @@ class InkHistory(private val limit: Int = 200) {
         redo.clear()
     }
 
+    fun clear() {
+        undo.clear()
+        redo.clear()
+    }
+
     fun popUndo(): InkEdit? = undo.removeLastOrNull()?.also { redo.addLast(it) }
     fun popRedo(): InkEdit? = redo.removeLastOrNull()?.also { undo.addLast(it) }
 }

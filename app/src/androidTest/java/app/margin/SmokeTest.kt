@@ -11,6 +11,7 @@ import android.view.MotionEvent
 import android.view.WindowManager
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.doubleClick
+import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -178,6 +179,24 @@ class SmokeTest {
             compose.onNodeWithContentDescription("Show pages").performClick()
             settle(2000)
             shot("10-pages-panel")
+
+            // ---- Pages: add a lined page after this one, then delete it again ----
+            val onPage = currentPage()
+            compose.onNodeWithContentDescription("Add page").performClick()
+            settle(800)
+            compose.onNodeWithText("Lined").performClick()
+            compose.onNodeWithText("Add page").performClick()
+            compose.waitUntil(timeoutMillis = 20_000) { compose.onAllNodesWithText(" of 7", substring = true).fetchSemanticsNodes().isNotEmpty() }
+            settle(2500)
+            shot("10b-page-added")
+            compose.onNodeWithContentDescription("Page ${onPage + 1}").performTouchInput { longClick() }
+            settle(800)
+            compose.onNodeWithText("Delete page").performClick()
+            settle(600)
+            compose.onNodeWithText("Delete").performClick()
+            compose.waitUntil(timeoutMillis = 20_000) { compose.onAllNodesWithText(" of 6", substring = true).fetchSemanticsNodes().isNotEmpty() }
+            settle(1500)
+
             compose.onNodeWithContentDescription("Close pages").performClick()
             settle(800)
 
@@ -401,7 +420,7 @@ class SmokeTest {
 
     /** The page shown in the top bar ("Page 3 of 6" -> 3). */
     private fun currentPage(): Int =
-        (1..6).firstOrNull { compose.onAllNodesWithText("Page $it of 6").fetchSemanticsNodes().isNotEmpty() } ?: -1
+        (1..9).firstOrNull { compose.onAllNodesWithText("Page $it of ", substring = true).fetchSemanticsNodes().isNotEmpty() } ?: -1
 
     private fun waitForText(text: String) {
         compose.waitUntil(timeoutMillis = 20_000) {

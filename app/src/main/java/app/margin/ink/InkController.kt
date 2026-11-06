@@ -266,6 +266,24 @@ class InkController(ctx: Context, docId: String) {
         changed()
     }
 
+    /** A page was added at [at]: ink on later pages moves down one. (Undo history is reset.) */
+    fun onPageInserted(at: Int) = remapPages { if (it >= at) it + 1 else it }
+
+    /** Page [at] was deleted, with its ink: ink on later pages moves up one. (Undo history is reset.) */
+    fun onPageDeleted(at: Int) {
+        pages.remove(at)
+        remapPages { if (it > at) it - 1 else it }
+    }
+
+    private fun remapPages(move: (Int) -> Int) {
+        val old = HashMap(pages)
+        pages.clear()
+        old.forEach { (i, list) -> pages[move(i)] = list }
+        history.clear() // undo steps refer to page numbers that just changed
+        clearSelection()
+        changed()
+    }
+
     fun clearPage(page: Int) {
         if (strokes(page).isNotEmpty()) commit(mapOf(page to emptyList()))
     }
