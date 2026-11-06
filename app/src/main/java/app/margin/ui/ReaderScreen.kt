@@ -290,7 +290,8 @@ private fun InkSurface(state: ViewerState, ink: InkController, onDownAnywhere: (
             modifier = Modifier.fillMaxSize(),
         )
         val accent = Margin.colors.accent
-        Canvas(Modifier.fillMaxSize()) {
+        // Own layer: moving the cursor redraws only the cursor, not the pages under it.
+        Canvas(Modifier.fillMaxSize().graphicsLayer()) {
             val at = router?.penAt ?: return@Canvas
             if (ink.tool == Tool.Eraser) {
                 val r = if (ink.eraserMode == EraserMode.Area) ink.eraserSizeDp.dp.toPx() / 2f else 8.dp.toPx()

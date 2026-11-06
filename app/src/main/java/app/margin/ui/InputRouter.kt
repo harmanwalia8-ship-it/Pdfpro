@@ -157,10 +157,11 @@ class InputRouter(
         penPointer = ev.getPointerId(i)
         lastPenAt = SystemClock.uptimeMillis()
         val at = Offset(ev.getX(i), ev.getY(i))
-        penAt = at
         val style = ink.currentStyle
         erasing = style == null || ev.getToolType(i) == MotionEvent.TOOL_TYPE_ERASER ||
             (ev.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
+        // While writing, the ink itself shows where the pen is; the cursor is for hovering and erasing.
+        penAt = if (erasing) at else null
         if (erasing) {
             ink.beginErase()
             erasePage = -1
@@ -200,10 +201,11 @@ class InputRouter(
         if (++moves % 20 == 1) log("pen move #$moves index=$i history=${ev.historySize}")
         if (i < 0) return
         lastPenAt = SystemClock.uptimeMillis()
-        penAt = Offset(ev.getX(i), ev.getY(i))
         if (erasing) {
+            val at = Offset(ev.getX(i), ev.getY(i))
+            penAt = at
             for (h in 0 until ev.historySize) eraseTo(Offset(ev.getHistoricalX(i, h), ev.getHistoricalY(i, h)))
-            eraseTo(penAt!!)
+            eraseTo(at)
         } else {
             strokeId?.let { id -> safely("addToStroke") { strokes.addToStroke(ev, penPointer, id) } }
         }

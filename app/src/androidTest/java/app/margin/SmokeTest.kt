@@ -218,7 +218,7 @@ class SmokeTest {
         for (k in 0 until corners.size - 1) {
             val a = corners[k]
             val b = corners[k + 1]
-            val n = ((b - a).getDistance() / 6f).toInt().coerceAtLeast(1)
+            val n = ((b - a).getDistance() / 10f).toInt().coerceAtLeast(1)
             for (j in 0 until n) add(a + (b - a) * (j.toFloat() / n))
         }
         add(corners.last())
@@ -229,7 +229,10 @@ class SmokeTest {
         val ui = instrumentation.uiAutomation
         val down = SystemClock.uptimeMillis()
         var t = down
+        // Each event carries the real time it's sent, like a real pen. (A slow emulator would
+        // otherwise fall behind made-up timestamps and Android drops "stale" events.)
         fun send(action: Int, p: Offset) {
+            t = maxOf(t, SystemClock.uptimeMillis())
             val props = arrayOf(MotionEvent.PointerProperties().apply { id = 0; toolType = MotionEvent.TOOL_TYPE_STYLUS })
             val coords = arrayOf(MotionEvent.PointerCoords().apply { x = p.x; y = p.y; pressure = 0.8f; size = 0.02f })
             val ev = MotionEvent.obtain(down, t, action, 1, props, coords, 0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_STYLUS, 0)
