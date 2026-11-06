@@ -155,6 +155,19 @@ class SmokeTest {
             waitForText("CONTINUE WHERE YOU LEFT OFF")
             settle(1500)
             shot("11-library-after-reading")
+
+            // ---- Leaving the PDF saved the ink into the file itself, with a backup of the original ----
+            val end = SystemClock.uptimeMillis() + 15_000
+            var text = ""
+            while (SystemClock.uptimeMillis() < end) {
+                text = String(pdf.readBytes(), Charsets.ISO_8859_1)
+                if (text.contains("Margin") && text.contains("/Ink")) break
+                Thread.sleep(500)
+            }
+            check(text.contains("Margin") && text.contains("/Ink")) { "The ink wasn't saved into the PDF file" }
+            val backup = File(ctx.filesDir, "originals/${Library.idFor(Uri.fromFile(pdf))}.pdf")
+            check(backup.exists()) { "No backup of the original was kept" }
+            check(!String(backup.readBytes(), Charsets.ISO_8859_1).contains("Margin")) { "The backup isn't the untouched original" }
         }
     }
 

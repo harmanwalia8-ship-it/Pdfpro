@@ -86,6 +86,11 @@ import app.margin.BuildConfig
 import app.margin.data.Doc
 import app.margin.data.Library
 import app.margin.update.Updater
+import app.margin.pdf.PdfSaver
+import android.net.Uri
+import android.widget.Toast
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -122,6 +127,8 @@ fun LibraryScreen(onOpen: (String) -> Unit) {
     var query by rememberSaveable { mutableStateOf("") }
     var starredOnly by rememberSaveable { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    var restoreTarget by remember { mutableStateOf<Doc?>(null) }
+    val scope = rememberCoroutineScope()
     val shown = remember(docs, query, starredOnly) {
         docs.filter { (!starredOnly || it.starred) && (query.isBlank() || it.title.contains(query.trim(), ignoreCase = true)) }
     }
@@ -162,6 +169,7 @@ fun LibraryScreen(onOpen: (String) -> Unit) {
                     onOpen = { onOpen(d.id) },
                     onToggleStar = { library.update(d.id) { it.copy(starred = !it.starred) } },
                     onRemove = { library.remove(d.id) },
+                    onRestore = if (PdfSaver.hasBackup(ctx, d.id)) ({ restoreTarget = d }) else null,
                     modifier = Modifier.animateItem(),
                 )
             }
@@ -177,6 +185,25 @@ fun LibraryScreen(onOpen: (String) -> Unit) {
     }
 
     if (showSettings) SettingsDialog(onDismiss = { showSettings = false })
+    restoreTarget?.let { d ->
+        AlertDialog(
+            onDismissRequest = { restoreTarget = null },
+            containerColor = c.surface,
+            title = { Text("Restore the original PDF?", color = c.text, fontWeight = FontWeight.SemiBold) },
+            text = { Text("\"${d.title}\" goes back to how it was before Margin first saved ink into it. Your ink in this PDF will be removed.", color = c.textMuted) },
+            confirmButton = {
+                TextButton(onClick = {
+                    restoreTarget = null
+                    scope.launch {
+                        val ok = PdfSaver.restore(ctx, d.id, Uri.parse(d.uri))
+                        if (ok) java.io.File(ctx.filesDir, "ink/${d.id}.json").delete()
+                        Toast.makeText(ctx, if (ok) "Original restored" else "Couldn't restore the original", Toast.LENGTH_SHORT).show()
+                    }
+                }) { Text("Restore", color = c.danger) }
+            },
+            dismissButton = { TextButton(onClick = { restoreTarget = null }) { Text("Cancel") } },
+        )
+    }
 }
 
 @Composable
@@ -364,6 +391,7 @@ private fun DocCard(
     onOpen: () -> Unit,
     onToggleStar: () -> Unit,
     onRemove: () -> Unit,
+    onRestore: (() -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
     val c = Margin.colors
@@ -398,6 +426,13 @@ private fun DocCard(
                     leadingIcon = { Icon(MIcons.Star, contentDescription = null) },
                     onClick = { menu = false; onToggleStar() },
                 )
+                if (onRestore != null) {
+                    DropdownMenuItem(
+                        text = { Text("Restore original PDF") },
+                        leadingIcon = { Icon(MIcons.Undo, contentDescription = null) },
+                        onClick = { menu = false; onRestore() },
+                    )
+                }
                 DropdownMenuItem(
                     text = { Text("Remove from library") },
                     leadingIcon = { Icon(MIcons.Trash, contentDescription = null) },

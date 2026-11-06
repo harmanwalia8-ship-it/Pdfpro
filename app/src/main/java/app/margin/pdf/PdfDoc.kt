@@ -5,12 +5,13 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Rect
 import android.net.Uri
-import android.os.ParcelFileDescriptor
 import com.artifex.mupdf.fitz.Document
 import com.artifex.mupdf.fitz.Matrix
+import com.artifex.mupdf.fitz.PDFAnnotation
+import com.artifex.mupdf.fitz.PDFDocument
+import com.artifex.mupdf.fitz.PDFPage
 import com.artifex.mupdf.fitz.Page
-import com.artifex.mupdf.fitz.SeekableInputStream
-import com.artifex.mupdf.fitz.SeekableStream
+import com.artifex.mupdf.fitz.Point
 import com.artifex.mupdf.fitz.android.AndroidDrawDevice
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.asCoroutineDispatcher
@@ -19,9 +20,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.Closeable
 import java.io.File
-import java.io.FileInputStream
 import java.io.IOException
-import java.nio.ByteBuffer
 import java.util.concurrent.Executors
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -36,12 +35,20 @@ data class PageSize(val width: Float, val height: Float)
 
 class PasswordProtectedException : IOException("This PDF is password-protected.")
 
+/** Ink that Margin wrote into the PDF earlier: points (x, y pairs, page points) and look. */
+class SavedInk(val page: Int, val points: FloatArray, val color: Int, val width: Float, val opacity: Float, val subject: String?)
+
 class PdfDoc private constructor(
-    private val pfd: ParcelFileDescriptor?,
+    private val work: File,
     private val doc: Document,
     val pageSizes: List<PageSize>,
     private val origins: List<Pair<Float, Float>>,
+    /** Margin's ink annotations found in the file when it was opened. */
+    val savedInk: List<SavedInk>,
 ) : Closeable {
+
+    /** Pages that have (or had) Margin ink annotations; each save rewrites these. */
+    private val inkedPages = savedInk.mapTo(HashSet()) { it.page }
 
     val pageCount: Int get() = pageSizes.size
 
@@ -73,7 +80,16 @@ class PdfDoc private constructor(
         val (x0, y0) = origins[index]
         val device = AndroidDrawDevice(bitmap, (x0 * scale).roundToInt() + r.left, (y0 * scale).roundToInt() + r.top)
         try {
-            page(index).run(device, Matrix(scale, scale))
+            val page = page(index)
+            val ctm = Matrix(scale, scale)
+            if (page is PDFPage) {
+                // Margin's own ink is drawn (editable) by the ink layer, so skip it here.
+                page.runPageContents(device, ctm, null)
+                page.annotations?.forEach { a -> if (!isMargin(a)) a.run(device, ctm, null) }
+                page.runPageWidgets(device, ctm, null)
+            } else {
+                page.run(device, ctm)
+            }
             device.close()
         } finally {
             device.destroy()
@@ -91,23 +107,65 @@ class PdfDoc private constructor(
             pages.values.forEach { it.destroy() }
             pages.clear()
             doc.destroy()
-            runCatching { pfd?.close() }
+            work.delete()
         }
     }
 
-    companion object {
-        suspend fun open(ctx: Context, uri: Uri): PdfDoc = withContext(Mupdf.dispatcher) {
-            val pfd = ctx.contentResolver.openFileDescriptor(uri, "r") ?: throw IOException("Can't open this file.")
-            var keptPfd: ParcelFileDescriptor? = pfd
-            try {
-                val doc = if (pfd.statSize >= 0) {
-                    Document.openDocument(FdStream(pfd), "application/pdf")
-                } else {
-                    // Some providers hand out a pipe; MuPDF needs random access, so copy it first.
-                    pfd.close()
-                    keptPfd = null
-                    Document.openDocument(copyToCache(ctx, uri).path)
+    /**
+     * Writes [strokes] (per page, in page points) into the PDF as ink annotations, replacing
+     * Margin's previous ones, and saves the whole document to [out]. Returns false if this
+     * isn't a writable PDF.
+     */
+    suspend fun saveWithInk(strokes: Map<Int, List<InkForPdf>>, out: File): Boolean = withContext(Mupdf.dispatcher) {
+        val pdf = doc as? PDFDocument ?: return@withContext false
+        val touched = HashSet(inkedPages).apply { addAll(strokes.filterValues { it.isNotEmpty() }.keys) }
+        pdf.beginOperation("Margin ink")
+        try {
+            for (i in touched) {
+                if (i !in pageSizes.indices) continue
+                val page = page(i) as? PDFPage ?: continue
+                page.annotations?.filter { isMargin(it) }?.forEach { page.deleteAnnotation(it) }
+                val (x0, y0) = origins[i]
+                for (s in strokes[i].orEmpty()) {
+                    if (s.points.size < 4) continue
+                    val a = page.createAnnotation(PDFAnnotation.TYPE_INK)
+                    a.author = MARGIN
+                    a.subject = s.subject
+                    a.color = floatArrayOf(
+                        ((s.color shr 16) and 0xFF) / 255f, ((s.color shr 8) and 0xFF) / 255f, (s.color and 0xFF) / 255f,
+                    )
+                    a.opacity = s.opacity
+                    a.borderWidth = s.width
+                    a.inkList = arrayOf(Array(s.points.size / 2) { k -> Point(s.points[2 * k] + x0, s.points[2 * k + 1] + y0) })
+                    a.update()
                 }
+                page.update()
+                inkedPages += i
+            }
+        } finally {
+            pdf.endOperation()
+        }
+        out.parentFile?.mkdirs()
+        pdf.save(out.path, "garbage")
+        true
+    }
+
+    companion object {
+        const val MARGIN = "Margin"
+
+        private fun isMargin(a: PDFAnnotation): Boolean =
+            a.type == PDFAnnotation.TYPE_INK && runCatching { a.hasAuthor() && a.author == MARGIN }.getOrDefault(false)
+
+        /**
+         * Opens a private working copy of the PDF. Viewing the copy lets Margin safely
+         * rewrite the original file (with your ink) while you keep reading.
+         */
+        suspend fun open(ctx: Context, uri: Uri, workName: String): PdfDoc = withContext(Mupdf.dispatcher) {
+            val work = File(ctx.cacheDir, "work/$workName.pdf").apply { parentFile?.mkdirs() }
+            ctx.contentResolver.openInputStream(uri)?.use { input -> work.outputStream().use { input.copyTo(it) } }
+                ?: throw IOException("Can't read this file.")
+            try {
+                val doc = Document.openDocument(work.path)
                 if (doc.needsPassword()) {
                     doc.destroy()
                     throw PasswordProtectedException()
@@ -119,45 +177,41 @@ class PdfDoc private constructor(
                 }
                 val sizes = ArrayList<PageSize>(count)
                 val origins = ArrayList<Pair<Float, Float>>(count)
+                val saved = ArrayList<SavedInk>()
                 for (i in 0 until count) {
                     val p = doc.loadPage(i)
                     val b = p.bounds
                     sizes += PageSize(max(1f, b.x1 - b.x0), max(1f, b.y1 - b.y0))
                     origins += b.x0 to b.y0
+                    if (p is PDFPage) {
+                        p.annotations?.filter { isMargin(it) }?.forEach { a -> saved += readInk(i, a, b.x0, b.y0) }
+                    }
                     p.destroy()
                 }
-                PdfDoc(keptPfd, doc, sizes, origins)
+                PdfDoc(work, doc, sizes, origins, saved)
             } catch (t: Throwable) {
-                runCatching { keptPfd?.close() }
+                work.delete()
                 throw t
             }
         }
 
-        private fun copyToCache(ctx: Context, uri: Uri): File {
-            val out = File(ctx.cacheDir, "open/${uri.toString().hashCode()}.pdf").apply { parentFile?.mkdirs() }
-            ctx.contentResolver.openInputStream(uri)?.use { input -> out.outputStream().use { input.copyTo(it) } }
-                ?: throw IOException("Can't read this file.")
-            return out
+        private fun readInk(page: Int, a: PDFAnnotation, x0: Float, y0: Float): List<SavedInk> {
+            val c = a.color ?: floatArrayOf(0f, 0f, 0f)
+            val color = if (c.size >= 3) {
+                (0xFF shl 24) or ((c[0] * 255).toInt() shl 16) or ((c[1] * 255).toInt() shl 8) or (c[2] * 255).toInt()
+            } else 0xFF000000.toInt()
+            val subject = runCatching { if (a.hasSubject()) a.subject else null }.getOrNull()
+            return a.inkList.orEmpty().map { stroke ->
+                val pts = FloatArray(stroke.size * 2)
+                stroke.forEachIndexed { k, pt ->
+                    pts[2 * k] = pt.x - x0
+                    pts[2 * k + 1] = pt.y - y0
+                }
+                SavedInk(page, pts, color, a.borderWidth, a.opacity, subject)
+            }
         }
     }
 }
 
-/** Lets MuPDF read straight from the file Android gave us, without copying it. */
-private class FdStream(pfd: ParcelFileDescriptor) : SeekableInputStream {
-    private val channel = FileInputStream(pfd.fileDescriptor).channel
-
-    override fun read(buf: ByteArray): Int = channel.read(ByteBuffer.wrap(buf))
-
-    override fun seek(offset: Long, whence: Int): Long {
-        val pos = when (whence) {
-            SeekableStream.SEEK_SET -> offset
-            SeekableStream.SEEK_CUR -> channel.position() + offset
-            SeekableStream.SEEK_END -> channel.size() + offset
-            else -> throw IOException("Bad seek mode $whence")
-        }
-        channel.position(pos)
-        return pos
-    }
-
-    override fun position(): Long = channel.position()
-}
+/** One stroke as it goes into the PDF: x, y pairs in page points, and its look. */
+class InkForPdf(val points: FloatArray, val color: Int, val width: Float, val opacity: Float, val subject: String)

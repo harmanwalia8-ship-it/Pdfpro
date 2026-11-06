@@ -92,6 +92,12 @@ import app.margin.ink.InkController
 import app.margin.ink.Tool
 import app.margin.pdf.PasswordProtectedException
 import app.margin.pdf.PdfDoc
+import app.margin.pdf.PdfSaver
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -122,7 +128,9 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
         library.markOpened(docId)
         ink.load()
         try {
-            pdf = PdfDoc.open(ctx, Uri.parse(entry.uri))
+            val doc = PdfDoc.open(ctx, Uri.parse(entry.uri), workName = docId)
+            ink.importSaved(doc.savedInk) // e.g. after reinstalling: the ink is still in the PDF
+            pdf = doc
         } catch (e: CancellationException) {
             throw e
         } catch (e: PasswordProtectedException) {
@@ -135,11 +143,47 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
             error = "Couldn't open this PDF."
         }
     }
+    // ---- Saving your ink into the PDF file itself ----
+    var saveState by remember(docId) { mutableStateOf<PdfSaver.Result?>(null) }
+    var saving by remember(docId) { mutableStateOf(false) }
+    val uri = remember(docId) { entry?.let { Uri.parse(it.uri) } }
+    suspend fun saveIntoFile() {
+        val doc = pdf ?: return
+        if (uri == null || !ink.pdfDirty || saving) return
+        val v = ink.version
+        saving = true
+        val r = PdfSaver.save(ctx, docId, uri, doc, ink.forPdf())
+        saving = false
+        saveState = r
+        if (r == PdfSaver.Result.Saved) ink.markWrittenToPdf(v)
+    }
+    // After 20 quiet seconds...
+    LaunchedEffect(ink.version, pdf) {
+        if (pdf != null && ink.pdfDirty) {
+            delay(20_000)
+            saveIntoFile()
+        }
+    }
+    // ...when the app goes to the background...
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(lifecycle, pdf) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) appScope.launch { saveIntoFile() }
+        }
+        lifecycle.addObserver(observer)
+        onDispose { lifecycle.removeObserver(observer) }
+    }
+    // ...and when you leave this PDF (then close it).
     DisposableEffect(pdf) {
         val doc = pdf
-        onDispose { doc?.close() }
+        onDispose {
+            ink.flush()
+            appScope.launch {
+                if (doc != null && uri != null && ink.pdfDirty) PdfSaver.save(ctx, docId, uri, doc, ink.forPdf())
+                doc?.close()
+            }
+        }
     }
-    DisposableEffect(ink) { onDispose { ink.flush() } }
 
     val state = remember(pdf) {
         pdf?.let { ViewerState(it.pageSizes, density, entry?.lastPage ?: 0, entry?.zoom ?: 1f, entry?.zoomLocked ?: false) }
@@ -180,6 +224,14 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
         ReaderTopBar(
             title = entry?.title.orEmpty(),
             state = state,
+            status = when {
+                saving -> "Saving…"
+                ink.pdfDirty && saveState == PdfSaver.Result.ReadOnly -> "Can't save into this file; ink kept in Margin"
+                ink.pdfDirty && saveState == PdfSaver.Result.Failed -> "Not saved yet"
+                ink.pdfDirty -> null
+                saveState == PdfSaver.Result.Saved -> "Saved"
+                else -> null
+            },
             pagesOpen = showPages,
             onBack = onBack,
             onPages = { showPages = !showPages },
@@ -189,7 +241,14 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
                     hint = if (s.zoomLocked) "Zoom locked · scroll with two fingers" else "Zoom unlocked"
                 }
             },
-            onShare = { entry?.let { share(ctx, Uri.parse(it.uri), it.title) } },
+            onShare = {
+                entry?.let { e ->
+                    scope.launch {
+                        saveIntoFile() // share the file with your latest ink in it
+                        share(ctx, Uri.parse(e.uri), e.title)
+                    }
+                }
+            },
         )
         Box(Modifier.fillMaxWidth().weight(1f).background(c.desk)) {
             val doc = pdf
@@ -314,6 +373,7 @@ private fun InkSurface(state: ViewerState, ink: InkController, onDownAnywhere: (
 private fun ReaderTopBar(
     title: String,
     state: ViewerState?,
+    status: String?,
     pagesOpen: Boolean,
     onBack: () -> Unit,
     onPages: () -> Unit,
@@ -333,8 +393,8 @@ private fun ReaderTopBar(
             Column(Modifier.weight(1f).padding(start = 4.dp)) {
                 Text(title, color = c.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(
-                    if (state == null) "Opening…" else "Page ${page + 1} of ${state.pageCount}",
-                    color = c.textMuted, fontSize = 12.sp,
+                    if (state == null) "Opening…" else "Page ${page + 1} of ${state.pageCount}" + (status?.let { " · $it" } ?: ""),
+                    color = c.textMuted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
             }
             IconBtn(
@@ -465,6 +525,9 @@ private fun Message(text: String, onBack: () -> Unit, modifier: Modifier) {
         TextButton(onClick = onBack, modifier = Modifier.padding(top = 8.dp)) { Text("Back to library") }
     }
 }
+
+/** Saving outlives the reader screen, so leaving a PDF never cuts a save short. */
+private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
 private fun share(ctx: Context, uri: Uri, title: String) {
     val send = Intent(Intent.ACTION_SEND)

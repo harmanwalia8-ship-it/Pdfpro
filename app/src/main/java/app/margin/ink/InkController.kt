@@ -86,6 +86,50 @@ class InkController(ctx: Context, docId: String) {
 
     fun strokes(page: Int): List<InkStroke> = pages[page].orEmpty()
 
+    val isEmpty: Boolean get() = pages.values.all { it.isEmpty() }
+
+    /** Ink changed since it was last written into the PDF file. */
+    var pdfDirty by mutableStateOf(false)
+        private set
+
+    fun markWrittenToPdf(atVersion: Int) {
+        if (version == atVersion) pdfDirty = false
+    }
+
+    /** The ink as it goes into the PDF file: x, y pairs per stroke, plus color, width, opacity. */
+    fun forPdf(): Map<Int, List<app.margin.pdf.InkForPdf>> = pages.mapValues { (_, list) ->
+        list.map { s ->
+            val xy = FloatArray(s.count * 2)
+            for (i in 0 until s.count) {
+                xy[2 * i] = s.x(i)
+                xy[2 * i + 1] = s.y(i)
+            }
+            val hl = s.style.type == PenType.Highlighter
+            app.margin.pdf.InkForPdf(xy, s.style.color, s.style.size, if (hl) 0.45f else 1f, "Margin ${s.style.type.name}")
+        }
+    }
+
+    /** Ink found in the PDF itself (written by Margin before), used when Margin has none saved. */
+    fun importSaved(saved: List<app.margin.pdf.SavedInk>) {
+        if (saved.isEmpty() || !isEmpty) return
+        saved.forEach { si ->
+            val type = PenType.entries.firstOrNull { si.subject == "Margin ${it.name}" }
+                ?: if (si.opacity < 0.9f) PenType.Highlighter else PenType.Ballpoint
+            val n = si.points.size / 2
+            val pts = FloatArray(n * InkStroke.STRIDE)
+            for (i in 0 until n) {
+                pts[i * 4] = si.points[2 * i]
+                pts[i * 4 + 1] = si.points[2 * i + 1]
+                pts[i * 4 + 2] = -1f // pressure isn't stored in PDF ink
+                pts[i * 4 + 3] = i * 8f
+            }
+            val list = pages.getOrPut(si.page) { emptyList() }
+            pages[si.page] = list + InkStroke(nextId++, PenStyle(type, si.color, si.width), pts)
+        }
+        version++
+        scheduleSave()
+    }
+
     // ---- Drawing ----
     val textures = StockTextureBitmapStore(ctx.resources)
 
@@ -176,6 +220,7 @@ class InkController(ctx: Context, docId: String) {
 
     private fun changed() {
         version++
+        pdfDirty = true
         canUndo = history.canUndo
         canRedo = history.canRedo
         scheduleSave()

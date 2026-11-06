@@ -2,7 +2,11 @@
 
 A personal PDF reader and S Pen note app for an Android tablet (Galaxy Tab, Android 10+).
 
-**Status:** M0 + M1, the reader. You can open PDFs, scroll, zoom, use the pages sidebar, and the app remembers where you were. Writing with the S Pen comes in M2.
+**Status:** reader + S Pen writing + saving into the PDF.
+
+- Read: continuous pages, fling, pinch / double-tap zoom, pages sidebar, remembers your page and zoom.
+- Write: pen tray (ballpoint, fountain pen, pencil, marker, highlighter), area and stroke eraser, undo/redo, S Pen side button erases, palm rejection, zoom lock (two-finger scrolling).
+- Save: your ink is written into the original PDF as standard ink annotations (so other apps show it) when you leave the PDF, when the app goes to the background, and after 20 s without new strokes. Before the first save Margin keeps a backup of the untouched original; long-press a PDF in the library to restore it.
 
 ## Install on the tablet
 
