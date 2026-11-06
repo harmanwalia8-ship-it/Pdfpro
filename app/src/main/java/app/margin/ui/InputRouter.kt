@@ -109,6 +109,7 @@ class InputRouter(
                 if (id == penPointer) penUp(ev) else fingerUp(ev, id, last = action == MotionEvent.ACTION_UP)
             }
             MotionEvent.ACTION_CANCEL -> {
+                log("cancel event")
                 penCancel(ev)
                 endNavigation(fling = false)
             }
@@ -169,14 +170,34 @@ class InputRouter(
         val page = pageAt(at) ?: return
         host.requestUnbufferedDispatch(ev)
         // The live stroke is drawn in screen pixels, so its brush is scaled to the current zoom.
-        val id = strokes.startStroke(ev, penPointer, ink.brush(style!!, state.scale))
-        strokeId = id
-        pending[id] = Pending(page, style, viewToPage(page))
-        if (BuildConfig.DEBUG) Log.d("MarginInput", "pen down page=$page at=$at scale=${state.scale}")
+        try {
+            val id = strokes.startStroke(ev, penPointer, ink.brush(style!!, state.scale))
+            strokeId = id
+            pending[id] = Pending(page, style, viewToPage(page))
+            log("pen down page=$page at=$at scale=${state.scale}")
+        } catch (t: Throwable) {
+            Log.w("MarginInput", "startStroke failed", t)
+        }
+    }
+
+    private var moves = 0
+
+    private fun log(msg: String) {
+        if (BuildConfig.DEBUG) Log.d("MarginInput", msg)
+    }
+
+    /** Runs an Ink call; a failure ends the stroke cleanly (and is logged) instead of crashing. */
+    private inline fun safely(what: String, block: () -> Unit) {
+        try {
+            block()
+        } catch (t: Throwable) {
+            Log.w("MarginInput", "$what failed", t)
+        }
     }
 
     private fun penMove(ev: MotionEvent) {
         val i = ev.findPointerIndex(penPointer)
+        if (++moves % 20 == 1) log("pen move #$moves index=$i history=${ev.historySize}")
         if (i < 0) return
         lastPenAt = SystemClock.uptimeMillis()
         penAt = Offset(ev.getX(i), ev.getY(i))
@@ -184,13 +205,20 @@ class InputRouter(
             for (h in 0 until ev.historySize) eraseTo(Offset(ev.getHistoricalX(i, h), ev.getHistoricalY(i, h)))
             eraseTo(penAt!!)
         } else {
-            strokeId?.let { strokes.addToStroke(ev, penPointer, it) }
+            strokeId?.let { id -> safely("addToStroke") { strokes.addToStroke(ev, penPointer, id) } }
         }
     }
 
     private fun penUp(ev: MotionEvent) {
         lastPenAt = SystemClock.uptimeMillis()
-        if (erasing) ink.endErase() else strokeId?.let { strokes.finishStroke(ev, penPointer, it) }
+        log("pen up after $moves moves, erasing=$erasing")
+        moves = 0
+        if (erasing) ink.endErase() else strokeId?.let { id ->
+            safely("finishStroke") {
+                strokes.finishStroke(ev, penPointer, id)
+                strokes.requestHandoff()
+            }
+        }
         strokeId = null
         penPointer = -1
         erasing = false
@@ -199,6 +227,8 @@ class InputRouter(
 
     private fun penCancel(ev: MotionEvent) {
         if (penPointer < 0) return
+        log("pen cancel after $moves moves")
+        moves = 0
         if (erasing) ink.endErase() else strokeId?.let {
             strokes.cancelStroke(it, ev)
             pending.remove(it)
