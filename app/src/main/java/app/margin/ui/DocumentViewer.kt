@@ -180,6 +180,9 @@ private fun PageView(doc: PdfDoc, state: ViewerState, ink: InkController?, cache
                             val nc = it.nativeCanvas
                             nc.save()
                             nc.clipRect(max(left, 0f), max(top, 0f), min(left + w, size.width), min(top + h, size.height))
+                            // Ink's renderer only uses the transform as a quality hint; the canvas
+                            // itself must be moved and scaled onto the page.
+                            nc.concat(inkMatrix)
                             // Highlighter first, so pen ink always sits on top of it.
                             for (st in strokes) if (st.style.type == PenType.Highlighter) ink.renderer.draw(nc, ink.inkStroke(st), inkMatrix)
                             for (st in strokes) if (st.style.type != PenType.Highlighter) ink.renderer.draw(nc, ink.inkStroke(st), inkMatrix)
