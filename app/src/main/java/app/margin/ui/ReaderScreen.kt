@@ -73,6 +73,8 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.pointerInteropFilter
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -252,6 +254,7 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
  * which also receives every touch on the document and hands it to [InputRouter].
  * Draws the eraser ring / pen dot where the S Pen hovers.
  */
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun InkSurface(state: ViewerState, ink: InkController, onDownAnywhere: () -> Boolean) {
     val scope = rememberCoroutineScope()
@@ -260,24 +263,25 @@ private fun InkSurface(state: ViewerState, ink: InkController, onDownAnywhere: (
     val downAnywhere by rememberUpdatedState(onDownAnywhere)
     var router by remember { mutableStateOf<InputRouter?>(null) }
     Box(
-        Modifier.fillMaxSize().pointerInput(Unit) {
-            awaitPointerEventScope {
-                while (true) {
-                    val e = awaitPointerEvent(PointerEventPass.Initial)
-                    val pen = e.changes.firstOrNull { it.type == PointerType.Stylus || it.type == PointerType.Eraser } ?: continue
-                    if (!pen.pressed) router?.onPenHover(if (e.type == PointerEventType.Exit) null else pen.position)
+        Modifier.fillMaxSize()
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val e = awaitPointerEvent(PointerEventPass.Initial)
+                        val pen = e.changes.firstOrNull { it.type == PointerType.Stylus || it.type == PointerType.Eraser } ?: continue
+                        if (!pen.pressed) router?.onPenHover(if (e.type == PointerEventType.Exit) null else pen.position)
+                    }
                 }
             }
-        },
+            // Every touch on the document (pen, fingers, palm) goes to the router as a raw MotionEvent.
+            .pointerInteropFilter { ev -> router?.onTouch(ev) ?: false },
     ) {
         AndroidView(
             factory = { context ->
                 InProgressStrokesView(context).apply {
                     textureBitmapStore = ink.textures
                     eagerInit()
-                    val r = InputRouter(state, ink, this, host, scope, density) { downAnywhere() }
-                    router = r
-                    setOnTouchListener { _, ev -> r.onTouch(ev) }
+                    router = InputRouter(state, ink, this, host, scope, density) { downAnywhere() }
                 }
             },
             modifier = Modifier.fillMaxSize(),
