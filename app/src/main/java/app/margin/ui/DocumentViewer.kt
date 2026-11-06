@@ -32,7 +32,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
@@ -44,8 +44,6 @@ import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntSize
 import app.margin.pdf.PdfDoc
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -129,6 +127,7 @@ private fun PageView(doc: PdfDoc, state: ViewerState, cache: PageCache, index: I
     }
     var base by remember(index) { mutableStateOf(cache[index]) }
     val fade = remember(index) { Animatable(if (base != null) 1f else 0f) }
+    val imagePaint = remember(index) { Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG) }
 
     LaunchedEffect(index, targetWidth) {
         val have = base
@@ -184,20 +183,24 @@ private fun PageView(doc: PdfDoc, state: ViewerState, cache: PageCache, index: I
                         pagePaint,
                     )
                 }
-                base?.let { drawVisiblePart(it, RectF(left, top, left + w, top + h), fade.value) }
+                base?.let { drawVisiblePart(it, RectF(left, top, left + w, top + h), fade.value, imagePaint) }
                 patch?.let { p ->
                     drawVisiblePart(
                         p.image,
                         RectF(left + p.rectPt.left * s, top + p.rectPt.top * s, left + p.rectPt.right * s, top + p.rectPt.bottom * s),
                         1f,
+                        imagePaint,
                     )
                 }
             },
     )
 }
 
-/** Draws [image] stretched over [dst] (screen px), but only the part that's on screen. */
-private fun DrawScope.drawVisiblePart(image: ImageBitmap, dst: RectF, alpha: Float) {
+/**
+ * Draws [image] stretched over [dst] (screen px), but only the part that's on screen.
+ * Uses float positions so the page glides smoothly instead of snapping pixel by pixel.
+ */
+private fun DrawScope.drawVisiblePart(image: ImageBitmap, dst: RectF, alpha: Float, paint: Paint) {
     val visL = max(0f, dst.left)
     val visT = max(0f, dst.top)
     val visR = min(size.width, dst.right)
@@ -209,20 +212,16 @@ private fun DrawScope.drawVisiblePart(image: ImageBitmap, dst: RectF, alpha: Flo
     val srcT = floor((visT - dst.top) * sy).toInt().coerceIn(0, image.height - 1)
     val srcR = ceil((visR - dst.left) * sx).toInt().coerceIn(srcL + 1, image.width)
     val srcB = ceil((visB - dst.top) * sy).toInt().coerceIn(srcT + 1, image.height)
-    // Map the whole source pixels back to the screen so the image never shifts while scrolling.
-    val dL = dst.left + srcL / sx
-    val dT = dst.top + srcT / sy
-    val dR = dst.left + srcR / sx
-    val dB = dst.top + srcB / sy
-    drawImage(
-        image,
-        srcOffset = IntOffset(srcL, srcT),
-        srcSize = IntSize(srcR - srcL, srcB - srcT),
-        dstOffset = IntOffset(dL.roundToInt(), dT.roundToInt()),
-        dstSize = IntSize((dR - dL).roundToInt().coerceAtLeast(1), (dB - dT).roundToInt().coerceAtLeast(1)),
-        alpha = alpha,
-        filterQuality = FilterQuality.Medium,
-    )
+    // Map the whole source pixels back to the screen exactly, so the image never shifts while scrolling.
+    paint.alpha = (alpha * 255).roundToInt().coerceIn(0, 255)
+    drawIntoCanvas {
+        it.nativeCanvas.drawBitmap(
+            image.asAndroidBitmap(),
+            Rect(srcL, srcT, srcR, srcB),
+            RectF(dst.left + srcL / sx, dst.top + srcT / sy, dst.left + srcR / sx, dst.top + srcB / sy),
+            paint,
+        )
+    }
 }
 
 private suspend fun PointerInputScope.viewerGestures(state: ViewerState, scope: CoroutineScope) {
@@ -254,18 +253,20 @@ private suspend fun PointerInputScope.viewerGestures(state: ViewerState, scope: 
                 state.scrollBy(-pan.x, -pan.y)
                 event.changes.forEach { if (it.positionChanged()) it.consume() }
             }
-            if (pressed == 1) {
-                event.changes.firstOrNull { it.pressed }?.let { tracker.addPosition(it.uptimeMillis, it.position) }
-            } else {
+            if (pressed >= 2) {
                 tracker.resetTracking()
+            } else {
+                // Includes the finger-up event: its position is the last sample of the swipe.
+                event.changes.firstOrNull()?.let { tracker.addPosition(it.uptimeMillis, it.position) }
             }
         } while (event.changes.any { it.pressed })
 
         val v = tracker.calculateVelocity()
-        val speed = hypot(v.x, v.y)
+        val speed = min(hypot(v.x, v.y), viewConfiguration.maximumFlingVelocity)
         if (pastSlop && !pinched && speed > 250f) {
-            val dx = -v.x / speed
-            val dy = -v.y / speed
+            val norm = hypot(v.x, v.y)
+            val dx = -v.x / norm
+            val dy = -v.y / norm
             fling = scope.launch {
                 var last = 0f
                 AnimationState(0f, speed).animateDecay(decay) {

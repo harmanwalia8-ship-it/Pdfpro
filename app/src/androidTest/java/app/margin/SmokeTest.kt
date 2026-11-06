@@ -62,15 +62,15 @@ class SmokeTest {
             waitForPageText()
             shot("03-reader-open")
 
-            repeat(3) {
-                compose.onRoot().performTouchInput {
-                    swipeUp(startY = bottom * 0.85f, endY = bottom * 0.25f, durationMillis = 250)
-                }
-                settle(300)
+            // One quick flick must keep gliding after the finger lifts: well past page 2.
+            compose.onRoot().performTouchInput {
+                swipeUp(startY = bottom * 0.8f, endY = bottom * 0.3f, durationMillis = 120)
             }
             settle(1500)
-            compose.onAllNodesWithText("Page 1 of 6").fetchSemanticsNodes().let {
-                check(it.isEmpty()) { "Swiping up didn't move to another page" }
+            for (p in 1..2) {
+                check(compose.onAllNodesWithText("Page $p of 6").fetchSemanticsNodes().isEmpty()) {
+                    "A quick flick stopped on page $p: scrolling doesn't glide"
+                }
             }
             waitForPageText()
             shot("04-reader-scrolled")
