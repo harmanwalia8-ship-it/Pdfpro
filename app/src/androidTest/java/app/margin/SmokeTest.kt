@@ -5,6 +5,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.pdf.PdfDocument
 import android.net.Uri
+import android.os.SystemClock
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.doubleClick
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
@@ -58,7 +59,7 @@ class SmokeTest {
 
             compose.onNodeWithText("Continue").performClick()
             waitForText("Page 1 of 6")
-            settle(2000)
+            waitForPageText()
             shot("03-reader-open")
 
             repeat(3) {
@@ -71,6 +72,7 @@ class SmokeTest {
             compose.onAllNodesWithText("Page 1 of 6").fetchSemanticsNodes().let {
                 check(it.isEmpty()) { "Swiping up didn't move to another page" }
             }
+            waitForPageText()
             shot("04-reader-scrolled")
 
             compose.onRoot().performTouchInput {
@@ -80,7 +82,9 @@ class SmokeTest {
                     durationMillis = 500,
                 )
             }
-            settle(2500) // sharp re-render of the zoomed area
+            settle(1000)
+            waitForPageText() // zoomed-in pages must still show their text
+            settle(2000) // sharp re-render of the zoomed area
             shot("05-reader-zoomed")
 
             compose.onRoot().performTouchInput { doubleClick(center) }
@@ -96,6 +100,38 @@ class SmokeTest {
             settle(1500)
             shot("07-library-after-reading")
         }
+    }
+
+    /**
+     * Waits until the middle of the screen shows page text (grey/black pixels on the white page),
+     * so a page that stays blank fails the test instead of slipping through.
+     */
+    private fun waitForPageText(timeoutMs: Long = 20_000) {
+        val end = SystemClock.uptimeMillis() + timeoutMs
+        var last = 0
+        while (SystemClock.uptimeMillis() < end) {
+            compose.waitForIdle()
+            val bitmap = instrumentation.uiAutomation.takeScreenshot()
+            if (bitmap != null) {
+                last = textPixels(bitmap)
+                if (last >= 1500) return
+            }
+            Thread.sleep(500)
+        }
+        error("The page never showed its text (only $last text pixels on screen)")
+    }
+
+    /** Counts darkish pixels in the middle of the screen, away from bars and the page pill. */
+    private fun textPixels(b: Bitmap): Int {
+        var n = 0
+        for (y in (b.height * 0.15f).toInt() until (b.height * 0.8f).toInt() step 3) {
+            for (x in (b.width * 0.15f).toInt() until (b.width * 0.85f).toInt() step 3) {
+                val c = b.getPixel(x, y)
+                val lum = (Color.red(c) * 299 + Color.green(c) * 587 + Color.blue(c) * 114) / 1000
+                if (lum < 130) n++
+            }
+        }
+        return n
     }
 
     private fun waitForText(text: String) {

@@ -5,6 +5,10 @@ set -u
 OUT=emulator-output
 mkdir -p "$OUT"
 
+# The CI emulator is slow; keep its own "X isn't responding" pop-ups out of the screenshots.
+adb shell settings put global hide_error_dialogs 1 || true
+adb shell settings put secure anr_show_background 0 || true
+
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
 adb logcat -c

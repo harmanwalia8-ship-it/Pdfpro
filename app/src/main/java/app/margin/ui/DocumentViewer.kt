@@ -1,5 +1,6 @@
 package app.margin.ui
 
+import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
 import android.util.LruCache
@@ -17,7 +18,6 @@ import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.offset
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -31,29 +31,29 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.input.pointer.util.VelocityTracker
-import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
-import androidx.compose.ui.unit.dp
 import app.margin.pdf.PdfDoc
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.abs
+import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -62,14 +62,24 @@ import kotlin.math.roundToInt
 /**
  * Shows the PDF as one continuous column of pages.
  * One finger scrolls (with fling), two fingers pinch-zoom, double-tap toggles zoom.
- * Each page shows a full-page image; when zoomed in further than that image's resolution,
- * the visible part is re-rendered at full sharpness once you stop moving.
+ * Each page has a full-page image; when zoomed in past that image's resolution, the
+ * visible part is re-rendered at full sharpness once you stop moving.
+ *
+ * Every page draws straight onto the screen-sized viewer, and only the part that's
+ * on screen, so nothing gets huge at high zoom.
  */
 @Composable
 fun DocumentViewer(doc: PdfDoc, state: ViewerState, modifier: Modifier = Modifier) {
     val scope = rememberCoroutineScope()
     val cache = remember(doc) { PageCache() }
     DisposableEffect(cache) { onDispose { cache.clear() } }
+    val density = LocalDensity.current.density
+    val pagePaint = remember(density) {
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.WHITE
+            setShadowLayer(5f * density, 0f, 1f * density, 0x2E000000)
+        }
+    }
 
     Box(
         modifier
@@ -86,7 +96,7 @@ fun DocumentViewer(doc: PdfDoc, state: ViewerState, modifier: Modifier = Modifie
     ) {
         val range by remember(state) { derivedStateOf { state.visibleRange() } }
         for (i in range) {
-            key(i) { PageView(doc, state, cache, i) }
+            key(i) { PageView(doc, state, cache, i, pagePaint) }
         }
     }
 }
@@ -107,13 +117,13 @@ private class PageCache {
 }
 
 @Composable
-private fun PageView(doc: PdfDoc, state: ViewerState, cache: PageCache, index: Int) {
-    val size = state.pageSizes[index]
+private fun PageView(doc: PdfDoc, state: ViewerState, cache: PageCache, index: Int, pagePaint: Paint) {
+    val pageSize = state.pageSizes[index]
 
     // Full-page image: as wide as the page appears on screen (after zooming stops), capped at the screen width.
     val targetWidth by remember(index) {
         derivedStateOf {
-            val w = size.width * state.scaleAt(state.settledZoom)
+            val w = pageSize.width * state.scaleAt(state.settledZoom)
             min(w, state.viewport.width.toFloat()).roundToInt().coerceAtLeast(64)
         }
     }
@@ -123,7 +133,7 @@ private fun PageView(doc: PdfDoc, state: ViewerState, cache: PageCache, index: I
     LaunchedEffect(index, targetWidth) {
         val have = base
         if (have != null && have.width >= targetWidth * 0.92f && have.width <= targetWidth * 1.6f) return@LaunchedEffect
-        val bitmap = doc.render(index, targetWidth / size.width) ?: return@LaunchedEffect
+        val bitmap = doc.render(index, targetWidth / pageSize.width) ?: return@LaunchedEffect
         val image = bitmap.asImageBitmap()
         cache[index] = image
         base = image
@@ -134,8 +144,8 @@ private fun PageView(doc: PdfDoc, state: ViewerState, cache: PageCache, index: I
     var patch by remember(index) { mutableStateOf<Patch?>(null) }
     LaunchedEffect(index, state.settleTick) {
         val s = state.scaleAt(state.settledZoom)
-        val pw = size.width * s
-        val ph = size.height * s
+        val pw = pageSize.width * s
+        val ph = pageSize.height * s
         if (pw <= targetWidth * 1.05f) {
             patch = null
             return@LaunchedEffect
@@ -143,8 +153,8 @@ private fun PageView(doc: PdfDoc, state: ViewerState, cache: PageCache, index: I
         val left = state.pageLeft(index, s) - state.scrollX
         val top = state.pageTop(index, s) - state.scrollY
         val visible = Rect(
-            max(0f, -left).toInt(), max(0f, -top).toInt(),
-            min(pw, state.viewport.width - left).toInt(), min(ph, state.viewport.height - top).toInt(),
+            floor(max(0f, -left)).toInt(), floor(max(0f, -top)).toInt(),
+            ceil(min(pw, state.viewport.width - left)).toInt(), ceil(min(ph, state.viewport.height - top)).toInt(),
         )
         if (visible.isEmpty) return@LaunchedEffect
         delay(50) // a quick follow-up gesture cancels this render
@@ -157,35 +167,61 @@ private fun PageView(doc: PdfDoc, state: ViewerState, cache: PageCache, index: I
 
     Box(
         Modifier
-            .offset {
-                IntOffset(
-                    (state.pageLeft(index) - state.scrollX).roundToInt(),
-                    (state.pageTop(index) - state.scrollY).roundToInt(),
-                )
-            }
-            .layout { measurable, _ ->
-                val w = state.pageWidth(index).roundToInt().coerceAtLeast(1)
-                val h = state.pageHeight(index).roundToInt().coerceAtLeast(1)
-                val placeable = measurable.measure(Constraints.fixed(w, h))
-                layout(w, h) { placeable.place(0, 0) }
-            }
-            .shadow(2.dp, RectangleShape, clip = false)
+            .fillMaxSize()
             .drawBehind {
-                drawRect(Color.White)
-                val dst = IntSize(this.size.width.roundToInt(), this.size.height.roundToInt())
-                base?.let {
-                    drawImage(it, dstSize = dst, alpha = fade.value, filterQuality = FilterQuality.Medium)
+                val s = state.scale
+                val left = state.pageLeft(index, s) - state.scrollX
+                val top = state.pageTop(index, s) - state.scrollY
+                val w = pageSize.width * s
+                val h = pageSize.height * s
+                if (left >= size.width || top >= size.height || left + w <= 0f || top + h <= 0f) return@drawBehind
+
+                // White page with a soft shadow (only the on-screen part, so it never gets huge).
+                val pad = 16f * density
+                drawIntoCanvas {
+                    it.nativeCanvas.drawRect(
+                        max(left, -pad), max(top, -pad), min(left + w, size.width + pad), min(top + h, size.height + pad),
+                        pagePaint,
+                    )
                 }
+                base?.let { drawVisiblePart(it, RectF(left, top, left + w, top + h), fade.value) }
                 patch?.let { p ->
-                    val k = this.size.width / size.width
-                    drawImage(
+                    drawVisiblePart(
                         p.image,
-                        dstOffset = IntOffset((p.rectPt.left * k).roundToInt(), (p.rectPt.top * k).roundToInt()),
-                        dstSize = IntSize((p.rectPt.width() * k).roundToInt(), (p.rectPt.height() * k).roundToInt()),
-                        filterQuality = FilterQuality.Medium,
+                        RectF(left + p.rectPt.left * s, top + p.rectPt.top * s, left + p.rectPt.right * s, top + p.rectPt.bottom * s),
+                        1f,
                     )
                 }
             },
+    )
+}
+
+/** Draws [image] stretched over [dst] (screen px), but only the part that's on screen. */
+private fun DrawScope.drawVisiblePart(image: ImageBitmap, dst: RectF, alpha: Float) {
+    val visL = max(0f, dst.left)
+    val visT = max(0f, dst.top)
+    val visR = min(size.width, dst.right)
+    val visB = min(size.height, dst.bottom)
+    if (visR <= visL || visB <= visT || dst.width() <= 0f || dst.height() <= 0f) return
+    val sx = image.width / dst.width()
+    val sy = image.height / dst.height()
+    val srcL = floor((visL - dst.left) * sx).toInt().coerceIn(0, image.width - 1)
+    val srcT = floor((visT - dst.top) * sy).toInt().coerceIn(0, image.height - 1)
+    val srcR = ceil((visR - dst.left) * sx).toInt().coerceIn(srcL + 1, image.width)
+    val srcB = ceil((visB - dst.top) * sy).toInt().coerceIn(srcT + 1, image.height)
+    // Map the whole source pixels back to the screen so the image never shifts while scrolling.
+    val dL = dst.left + srcL / sx
+    val dT = dst.top + srcT / sy
+    val dR = dst.left + srcR / sx
+    val dB = dst.top + srcB / sy
+    drawImage(
+        image,
+        srcOffset = IntOffset(srcL, srcT),
+        srcSize = IntSize(srcR - srcL, srcB - srcT),
+        dstOffset = IntOffset(dL.roundToInt(), dT.roundToInt()),
+        dstSize = IntSize((dR - dL).roundToInt().coerceAtLeast(1), (dB - dT).roundToInt().coerceAtLeast(1)),
+        alpha = alpha,
+        filterQuality = FilterQuality.Medium,
     )
 }
 
