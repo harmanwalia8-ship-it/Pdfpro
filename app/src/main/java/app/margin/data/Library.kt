@@ -28,6 +28,8 @@ data class Doc(
     val lastPage: Int = 0,
     val lastOpened: Long = System.currentTimeMillis(),
     val starred: Boolean = false,
+    val zoom: Float = 1f,
+    val zoomLocked: Boolean = false,
 )
 
 /**
@@ -97,6 +99,8 @@ class Library private constructor(private val ctx: Context) {
                 lastPage = o.optInt("lastPage"),
                 lastOpened = o.optLong("lastOpened"),
                 starred = o.optBoolean("starred"),
+                zoom = o.optDouble("zoom", 1.0).toFloat(),
+                zoomLocked = o.optBoolean("zoomLocked"),
             )
         }.sortedByDescending { it.lastOpened }
     }.getOrDefault(emptyList())
@@ -111,7 +115,8 @@ class Library private constructor(private val ctx: Context) {
                         JSONObject()
                             .put("id", d.id).put("uri", d.uri).put("title", d.title)
                             .put("pageCount", d.pageCount).put("lastPage", d.lastPage)
-                            .put("lastOpened", d.lastOpened).put("starred", d.starred),
+                            .put("lastOpened", d.lastOpened).put("starred", d.starred)
+                            .put("zoom", d.zoom.toDouble()).put("zoomLocked", d.zoomLocked),
                     )
                 }
                 val tmp = File(file.parentFile, "library.json.tmp")

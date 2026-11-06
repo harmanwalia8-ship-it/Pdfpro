@@ -77,6 +77,13 @@ dependencies {
 
     implementation("com.artifex.mupdf:fitz:1.28.5")
 
+    // Low-latency, pressure-sensitive S Pen ink (Jetpack Ink).
+    implementation("androidx.ink:ink-authoring:1.0.0")
+    implementation("androidx.ink:ink-brush:1.0.0")
+    implementation("androidx.ink:ink-strokes:1.0.0")
+    implementation("androidx.ink:ink-rendering:1.0.0")
+    implementation("androidx.ink:ink-geometry:1.0.0")
+
     testImplementation("junit:junit:4.13.2")
 
     androidTestImplementation(composeBom)

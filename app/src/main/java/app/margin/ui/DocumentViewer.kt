@@ -1,21 +1,13 @@
 package app.margin.ui
 
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
 import android.util.LruCache
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.AnimationState
-import androidx.compose.animation.core.animateDecay
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.splineBasedDecay
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.calculateCentroid
-import androidx.compose.foundation.gestures.calculatePan
-import androidx.compose.foundation.gestures.calculateZoom
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
@@ -26,49 +18,38 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
-import androidx.compose.ui.input.pointer.PointerInputScope
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.positionChanged
-import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import app.margin.ink.InkController
+import app.margin.ink.PenType
 import app.margin.pdf.PdfDoc
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
-import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * Shows the PDF as one continuous column of pages.
- * One finger scrolls (with fling), two fingers pinch-zoom, double-tap toggles zoom.
- * Each page has a full-page image; when zoomed in past that image's resolution, the
- * visible part is re-rendered at full sharpness once you stop moving.
+ * Draws the PDF as one continuous column of pages, with each page's ink on top.
+ * Input (pen and fingers) is handled by [InputRouter]; this only draws.
  *
- * Every page draws straight onto the screen-sized viewer, and only the part that's
- * on screen, so nothing gets huge at high zoom.
+ * Each page has a full-page image; when zoomed in past that image's resolution, the
+ * visible part is re-rendered at full sharpness once you stop moving. Every page draws
+ * straight onto the screen-sized viewer, and only the part that's on screen.
  */
 @Composable
-fun DocumentViewer(doc: PdfDoc, state: ViewerState, modifier: Modifier = Modifier) {
-    val scope = rememberCoroutineScope()
+fun DocumentViewer(doc: PdfDoc, state: ViewerState, ink: InkController?, modifier: Modifier = Modifier) {
     val cache = remember(doc) { PageCache() }
     DisposableEffect(cache) { onDispose { cache.clear() } }
     val density = LocalDensity.current.density
@@ -84,17 +65,11 @@ fun DocumentViewer(doc: PdfDoc, state: ViewerState, modifier: Modifier = Modifie
             .fillMaxSize()
             .background(Margin.colors.desk)
             .clipToBounds()
-            .onSizeChanged { state.onViewport(it) }
-            .pointerInput(state) {
-                detectTapGestures(onDoubleTap = { p ->
-                    scope.launch { state.animateZoomTo(if (state.zoom < 1.5f) 2.2f else 1f, p) }
-                })
-            }
-            .pointerInput(state) { viewerGestures(state, scope) },
+            .onSizeChanged { state.onViewport(it) },
     ) {
         val range by remember(state) { derivedStateOf { state.visibleRange() } }
         for (i in range) {
-            key(i) { PageView(doc, state, cache, i, pagePaint) }
+            key(i) { PageView(doc, state, ink, cache, i, pagePaint) }
         }
     }
 }
@@ -115,7 +90,7 @@ private class PageCache {
 }
 
 @Composable
-private fun PageView(doc: PdfDoc, state: ViewerState, cache: PageCache, index: Int, pagePaint: Paint) {
+private fun PageView(doc: PdfDoc, state: ViewerState, ink: InkController?, cache: PageCache, index: Int, pagePaint: Paint) {
     val pageSize = state.pageSizes[index]
 
     // Full-page image: as wide as the page appears on screen (after zooming stops), capped at the screen width.
@@ -128,6 +103,7 @@ private fun PageView(doc: PdfDoc, state: ViewerState, cache: PageCache, index: I
     var base by remember(index) { mutableStateOf(cache[index]) }
     val fade = remember(index) { Animatable(if (base != null) 1f else 0f) }
     val imagePaint = remember(index) { Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG) }
+    val inkMatrix = remember(index) { Matrix() }
 
     LaunchedEffect(index, targetWidth) {
         val have = base
@@ -192,6 +168,25 @@ private fun PageView(doc: PdfDoc, state: ViewerState, cache: PageCache, index: I
                         imagePaint,
                     )
                 }
+
+                // Ink, stored in page points: scale and move it onto the page, clipped to the paper.
+                if (ink != null) {
+                    ink.version // redraw when the ink changes
+                    val strokes = ink.strokes(index)
+                    if (strokes.isNotEmpty()) {
+                        inkMatrix.setScale(s, s)
+                        inkMatrix.postTranslate(left, top)
+                        drawIntoCanvas {
+                            val nc = it.nativeCanvas
+                            nc.save()
+                            nc.clipRect(max(left, 0f), max(top, 0f), min(left + w, size.width), min(top + h, size.height))
+                            // Highlighter first, so pen ink always sits on top of it.
+                            for (st in strokes) if (st.style.type == PenType.Highlighter) ink.renderer.draw(nc, ink.inkStroke(st), inkMatrix)
+                            for (st in strokes) if (st.style.type != PenType.Highlighter) ink.renderer.draw(nc, ink.inkStroke(st), inkMatrix)
+                            nc.restore()
+                        }
+                    }
+                }
             },
     )
 }
@@ -221,63 +216,5 @@ private fun DrawScope.drawVisiblePart(image: ImageBitmap, dst: RectF, alpha: Flo
             RectF(dst.left + srcL / sx, dst.top + srcT / sy, dst.left + srcR / sx, dst.top + srcB / sy),
             paint,
         )
-    }
-}
-
-private suspend fun PointerInputScope.viewerGestures(state: ViewerState, scope: CoroutineScope) {
-    val decay = splineBasedDecay<Float>(this)
-    var fling: Job? = null
-    awaitEachGesture {
-        val down = awaitFirstDown(requireUnconsumed = false)
-        fling?.cancel()
-        val tracker = VelocityTracker()
-        tracker.addPosition(down.uptimeMillis, down.position)
-        var pinched = false
-        var pastSlop = false
-        var travel = Offset.Zero
-        do {
-            val event = awaitPointerEvent()
-            val pressed = event.changes.count { it.pressed }
-            if (pressed >= 2) pinched = true
-            val zoom = event.calculateZoom()
-            val pan = event.calculatePan()
-            if (!pastSlop) {
-                travel += pan
-                pastSlop = travel.getDistance() > viewConfiguration.touchSlop || abs(zoom - 1f) > 0.01f
-            }
-            if (pastSlop) {
-                if (zoom != 1f) {
-                    val c = event.calculateCentroid(useCurrent = true)
-                    if (c != Offset.Unspecified) state.zoomBy(zoom, c)
-                }
-                state.scrollBy(-pan.x, -pan.y)
-                event.changes.forEach { if (it.positionChanged()) it.consume() }
-            }
-            if (pressed >= 2) {
-                tracker.resetTracking()
-            } else {
-                // Includes the finger-up event: its position is the last sample of the swipe.
-                event.changes.firstOrNull()?.let { tracker.addPosition(it.uptimeMillis, it.position) }
-            }
-        } while (event.changes.any { it.pressed })
-
-        val v = tracker.calculateVelocity()
-        val speed = min(hypot(v.x, v.y), viewConfiguration.maximumFlingVelocity)
-        if (pastSlop && !pinched && speed > 250f) {
-            val norm = hypot(v.x, v.y)
-            val dx = -v.x / norm
-            val dy = -v.y / norm
-            fling = scope.launch {
-                var last = 0f
-                AnimationState(0f, speed).animateDecay(decay) {
-                    val step = value - last
-                    last = value
-                    if (!state.scrollBy(dx * step, dy * step)) cancelAnimation()
-                }
-                state.settle()
-            }
-        } else {
-            state.settle()
-        }
     }
 }

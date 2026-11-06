@@ -6,6 +6,9 @@ import android.graphics.Paint
 import android.graphics.pdf.PdfDocument
 import android.net.Uri
 import android.os.SystemClock
+import android.view.InputDevice
+import android.view.MotionEvent
+import android.view.WindowManager
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.doubleClick
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
@@ -88,16 +91,66 @@ class SmokeTest {
 
             compose.onRoot().performTouchInput { doubleClick(center) }
             settle(1200)
+
+            // ---- S Pen: write, erase, undo. Fingers never write (the flick above left no ink). ----
+            val before = blueInk()
+            penStroke(zigzag())
+            val written = waitForBlueInk { it > before + 250 }
+            shot("06-pen-stroke")
+
+            compose.onNodeWithContentDescription("Eraser").performClick()
+            settle(600)
+            penStroke(scribbleOverZigzag())
+            settle(1200)
+            val erased = blueInk()
+            check(erased < before + (written - before) / 4) { "The eraser didn't remove the ink ($before -> $written -> $erased)" }
+            shot("07-erased")
+
+            compose.onNodeWithContentDescription("Undo").performClick()
+            waitForBlueInk { it > erased + (written - before) / 2 }
+
+            compose.onNodeWithContentDescription("Pen 1: Fountain").performClick() // pick the pen again
+            settle(500)
+            compose.onNodeWithContentDescription("Pen 1: Fountain").performClick() // ...and open its options
+            settle(900)
+            shot("08-pen-options")
+            compose.onNodeWithContentDescription("Pen 1: Fountain").performClick()
+            settle(500)
+
+            // ---- Zoom lock: one finger does nothing, two fingers scroll ----
+            compose.onNodeWithContentDescription("Lock zoom").performClick()
+            settle(600)
+            val lockedOn = currentPage()
+            compose.onRoot().performTouchInput { swipeUp(startY = bottom * 0.7f, endY = bottom * 0.3f, durationMillis = 120) }
+            settle(1200)
+            check(currentPage() == lockedOn) { "With the zoom locked, one finger still scrolled" }
+            compose.onRoot().performTouchInput {
+                down(0, Offset(centerX - 150f, bottom * 0.7f))
+                down(1, Offset(centerX + 150f, bottom * 0.7f))
+                repeat(30) {
+                    updatePointerBy(0, Offset(0f, -90f))
+                    updatePointerBy(1, Offset(0f, -90f))
+                    move()
+                }
+                up(0)
+                up(1)
+            }
+            settle(1500)
+            check(currentPage() != lockedOn) { "With the zoom locked, two fingers didn't scroll" }
+            shot("09-zoom-locked")
+            compose.onNodeWithContentDescription("Unlock zoom").performClick()
+            settle(600)
+
             compose.onNodeWithContentDescription("Show pages").performClick()
             settle(2000)
-            shot("06-pages-panel")
+            shot("10-pages-panel")
             compose.onNodeWithContentDescription("Close pages").performClick()
             settle(800)
 
             compose.onNodeWithContentDescription("Back to library").performClick()
             waitForText("CONTINUE WHERE YOU LEFT OFF")
             settle(1500)
-            shot("07-library-after-reading")
+            shot("11-library-after-reading")
         }
     }
 
@@ -138,6 +191,88 @@ class SmokeTest {
         }
         return n
     }
+
+    private val screen by lazy { ctx.getSystemService(WindowManager::class.java).currentWindowMetrics.bounds }
+
+    /** A zigzag across the middle of the screen, as dense pen points. */
+    private fun zigzag(): List<Offset> {
+        val w = screen.width().toFloat()
+        val h = screen.height().toFloat()
+        val corners = (0..6).map { i -> Offset(w * (0.35f + 0.05f * i), h * (if (i % 2 == 0) 0.40f else 0.50f)) }
+        return dense(corners)
+    }
+
+    /** Back-and-forth passes covering the zigzag, for the eraser. */
+    private fun scribbleOverZigzag(): List<Offset> {
+        val w = screen.width().toFloat()
+        val h = screen.height().toFloat()
+        val corners = (0..10).map { i -> Offset(w * (if (i % 2 == 0) 0.32f else 0.68f), h * (0.37f + 0.016f * i)) }
+        return dense(corners)
+    }
+
+    private fun dense(corners: List<Offset>): List<Offset> = buildList {
+        for (k in 0 until corners.size - 1) {
+            val a = corners[k]
+            val b = corners[k + 1]
+            val n = ((b - a).getDistance() / 6f).toInt().coerceAtLeast(1)
+            for (j in 0 until n) add(a + (b - a) * (j.toFloat() / n))
+        }
+        add(corners.last())
+    }
+
+    /** Draws with a simulated S Pen (stylus tool type, real pressure), like a person would. */
+    private fun penStroke(points: List<Offset>) {
+        val ui = instrumentation.uiAutomation
+        val down = SystemClock.uptimeMillis()
+        var t = down
+        fun send(action: Int, p: Offset) {
+            val props = arrayOf(MotionEvent.PointerProperties().apply { id = 0; toolType = MotionEvent.TOOL_TYPE_STYLUS })
+            val coords = arrayOf(MotionEvent.PointerCoords().apply { x = p.x; y = p.y; pressure = 0.8f; size = 0.02f })
+            val ev = MotionEvent.obtain(down, t, action, 1, props, coords, 0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_STYLUS, 0)
+            ui.injectInputEvent(ev, true)
+            ev.recycle()
+        }
+        send(MotionEvent.ACTION_DOWN, points.first())
+        for (p in points.drop(1)) {
+            t += 8
+            send(MotionEvent.ACTION_MOVE, p)
+        }
+        t += 8
+        send(MotionEvent.ACTION_UP, points.last())
+    }
+
+    /** Counts blue (pen-ink) pixels on the page area of the screen. */
+    private fun blueInk(): Int {
+        compose.waitForIdle()
+        val b = instrumentation.uiAutomation.takeScreenshot() ?: return 0
+        var n = 0
+        for (y in (b.height * 0.15f).toInt() until (b.height * 0.75f).toInt() step 3) {
+            for (x in (b.width * 0.2f).toInt() until (b.width * 0.8f).toInt() step 3) {
+                val c = b.getPixel(x, y)
+                val r = Color.red(c)
+                val g = Color.green(c)
+                val bl = Color.blue(c)
+                if (bl > 100 && bl > r + 50 && bl > g + 30) n++
+            }
+        }
+        return n
+    }
+
+    private fun waitForBlueInk(timeoutMs: Long = 10_000, ok: (Int) -> Boolean): Int {
+        val end = SystemClock.uptimeMillis() + timeoutMs
+        var last = 0
+        while (SystemClock.uptimeMillis() < end) {
+            last = blueInk()
+            if (ok(last)) return last
+            Thread.sleep(400)
+        }
+        shot("ink-FAILED")
+        error("Pen ink didn't show up as expected (last count $last)")
+    }
+
+    /** The page shown in the top bar ("Page 3 of 6" -> 3). */
+    private fun currentPage(): Int =
+        (1..6).firstOrNull { compose.onAllNodesWithText("Page $it of 6").fetchSemanticsNodes().isNotEmpty() } ?: -1
 
     private fun waitForText(text: String) {
         compose.waitUntil(timeoutMillis = 20_000) {

@@ -24,11 +24,16 @@ class ViewerState(
     val pageSizes: List<PageSize>,
     private val density: Float,
     private val initialPage: Int,
+    initialZoom: Float = 1f,
+    initialLocked: Boolean = false,
 ) {
     var viewport by mutableStateOf(IntSize.Zero)
         private set
-    var zoom by mutableFloatStateOf(1f)
+    var zoom by mutableFloatStateOf(initialZoom.coerceIn(0.5f, 6f))
         private set
+
+    /** Zoom lock: pinch and double-tap don't zoom, and scrolling takes two fingers. */
+    var zoomLocked by mutableStateOf(initialLocked)
     var scrollX by mutableFloatStateOf(0f)
         private set
     var scrollY by mutableFloatStateOf(0f)
@@ -37,7 +42,7 @@ class ViewerState(
     /** Bumped whenever scrolling or zooming comes to rest. Sharp re-renders wait for it. */
     var settleTick by mutableIntStateOf(0)
         private set
-    var settledZoom by mutableFloatStateOf(1f)
+    var settledZoom by mutableFloatStateOf(zoom)
         private set
 
     val minZoom = 0.5f

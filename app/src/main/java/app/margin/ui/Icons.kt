@@ -33,6 +33,10 @@ object MIcons {
     )
     val Nib = line("M5 19l1-4.5L15.5 5a2.1 2.1 0 0 1 3 3L9 17.5z M13.5 7l3 3")
     val ChevronDown = line("M6 9l6 6 6-6")
+    val Undo = line("M9 14L4 9l5-5 M4 9h10.5a5.5 5.5 0 0 1 0 11H11")
+    val Redo = line("M15 14l5-5-5-5 M20 9H9.5a5.5 5.5 0 0 0 0 11H13")
+    val Lock = line("M6.5 11h11a1.5 1.5 0 0 1 1.5 1.5v6a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 18.5v-6A1.5 1.5 0 0 1 6.5 11z M8.5 11V8a3.5 3.5 0 0 1 7 0v3")
+    val Unlock = line("M6.5 11h11a1.5 1.5 0 0 1 1.5 1.5v6a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 18.5v-6A1.5 1.5 0 0 1 6.5 11z M8.5 11V8a3.5 3.5 0 0 1 6.8-1.2")
 
     private fun line(d: String) = build(d, fill = false)
     private fun filled(d: String) = build(d, fill = true)

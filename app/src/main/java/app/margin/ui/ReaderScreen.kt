@@ -15,6 +15,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -50,9 +51,11 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -60,19 +63,31 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.PointerType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.ink.authoring.InProgressStrokesView
 import app.margin.data.Library
+import app.margin.ink.EraserMode
+import app.margin.ink.InkController
+import app.margin.ink.Tool
 import app.margin.pdf.PasswordProtectedException
 import app.margin.pdf.PdfDoc
 import kotlinx.coroutines.CancellationException
@@ -95,6 +110,7 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
 
     var pdf by remember(docId) { mutableStateOf<PdfDoc?>(null) }
     var error by remember(docId) { mutableStateOf<String?>(null) }
+    val ink = remember(docId) { InkController(ctx, docId) }
 
     LaunchedEffect(docId) {
         if (entry == null) {
@@ -102,6 +118,7 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
             return@LaunchedEffect
         }
         library.markOpened(docId)
+        ink.load()
         try {
             pdf = PdfDoc.open(ctx, Uri.parse(entry.uri))
         } catch (e: CancellationException) {
@@ -120,8 +137,11 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
         val doc = pdf
         onDispose { doc?.close() }
     }
+    DisposableEffect(ink) { onDispose { ink.flush() } }
 
-    val state = remember(pdf) { pdf?.let { ViewerState(it.pageSizes, density, entry?.lastPage ?: 0) } }
+    val state = remember(pdf) {
+        pdf?.let { ViewerState(it.pageSizes, density, entry?.lastPage ?: 0, entry?.zoom ?: 1f, entry?.zoomLocked ?: false) }
+    }
 
     // First open: remember the page count and save a cover thumbnail for the library.
     LaunchedEffect(pdf) {
@@ -133,17 +153,26 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
             withContext(Dispatchers.IO) { thumb.outputStream().use { bm.compress(Bitmap.CompressFormat.PNG, 100, it) } }
         }
     }
-    // Remember where you were.
+    // Remember where you were, how far you'd zoomed, and whether the zoom was locked.
     LaunchedEffect(state) {
         val s = state ?: return@LaunchedEffect
-        snapshotFlow { s.currentPage }.distinctUntilChanged().collectLatest { p ->
+        snapshotFlow { Triple(s.currentPage, s.settledZoom, s.zoomLocked) }.distinctUntilChanged().collectLatest { (p, z, l) ->
             delay(500)
-            library.update(docId) { it.copy(lastPage = p) }
+            library.update(docId) { it.copy(lastPage = p, zoom = z, zoomLocked = l) }
         }
     }
 
     var showPages by rememberSaveable(docId) { mutableStateOf(false) }
-    BackHandler(enabled = showPages) { showPages = false }
+    var panel by remember { mutableStateOf<TrayPanel?>(null) }
+    var hint by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(hint) {
+        if (hint != null) {
+            delay(2200)
+            hint = null
+        }
+    }
+    BackHandler(enabled = panel != null) { panel = null }
+    BackHandler(enabled = showPages && panel == null) { showPages = false }
 
     Column(Modifier.fillMaxSize().background(c.background)) {
         ReaderTopBar(
@@ -152,6 +181,12 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
             pagesOpen = showPages,
             onBack = onBack,
             onPages = { showPages = !showPages },
+            onToggleLock = {
+                state?.let { s ->
+                    s.zoomLocked = !s.zoomLocked
+                    hint = if (s.zoomLocked) "Zoom locked · scroll with two fingers" else "Zoom unlocked"
+                }
+            },
             onShare = { entry?.let { share(ctx, Uri.parse(it.uri), it.title) } },
         )
         Box(Modifier.fillMaxWidth().weight(1f).background(c.desk)) {
@@ -164,10 +199,40 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
                 doc == null || s == null -> Loading(Modifier.align(Alignment.Center))
                 else -> {
                     Box(Modifier.fillMaxSize().graphicsLayer { translationX = shift.toPx() }) {
-                        DocumentViewer(doc, s)
+                        DocumentViewer(doc, s, ink)
+                        key(s) {
+                            InkSurface(s, ink, onDownAnywhere = {
+                                if (panel != null) {
+                                    panel = null
+                                    true
+                                } else false
+                            })
+                        }
                     }
-                    PagePill(s, Modifier.align(Alignment.BottomCenter))
+                    PagePill(s, Modifier.align(Alignment.TopCenter))
+                    PenTray(
+                        ink = ink,
+                        panel = panel,
+                        onPanel = { panel = it },
+                        onClearPage = {
+                            ink.clearPage(s.currentPage)
+                            panel = null
+                        },
+                        modifier = Modifier.align(Alignment.BottomCenter)
+                            .windowInsetsPadding(WindowInsets.navigationBars).padding(bottom = 16.dp),
+                    )
                 }
+            }
+            androidx.compose.animation.AnimatedVisibility(
+                visible = hint != null,
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = 56.dp),
+                enter = fadeIn(tween(150)) + scaleIn(tween(200), initialScale = 0.92f),
+                exit = fadeOut(tween(300)),
+            ) {
+                Text(
+                    hint.orEmpty(), color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.background(Color(0xE61C1B1A), CircleShape).padding(horizontal = 16.dp, vertical = 8.dp),
+                )
             }
             androidx.compose.animation.AnimatedVisibility(
                 visible = showPages && doc != null && s != null,
@@ -182,6 +247,58 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
     }
 }
 
+/**
+ * The live ink layer (Jetpack Ink draws the stroke under the pen with very low latency),
+ * which also receives every touch on the document and hands it to [InputRouter].
+ * Draws the eraser ring / pen dot where the S Pen hovers.
+ */
+@Composable
+private fun InkSurface(state: ViewerState, ink: InkController, onDownAnywhere: () -> Boolean) {
+    val scope = rememberCoroutineScope()
+    val host = LocalView.current
+    val density = LocalDensity.current.density
+    val downAnywhere by rememberUpdatedState(onDownAnywhere)
+    var router by remember { mutableStateOf<InputRouter?>(null) }
+    Box(
+        Modifier.fillMaxSize().pointerInput(Unit) {
+            awaitPointerEventScope {
+                while (true) {
+                    val e = awaitPointerEvent(PointerEventPass.Initial)
+                    val pen = e.changes.firstOrNull { it.type == PointerType.Stylus || it.type == PointerType.Eraser } ?: continue
+                    if (!pen.pressed) router?.onPenHover(if (e.type == PointerEventType.Exit) null else pen.position)
+                }
+            }
+        },
+    ) {
+        AndroidView(
+            factory = { context ->
+                InProgressStrokesView(context).apply {
+                    textureBitmapStore = ink.textures
+                    eagerInit()
+                    val r = InputRouter(state, ink, this, host, scope, density) { downAnywhere() }
+                    router = r
+                    setOnTouchListener { _, ev -> r.onTouch(ev) }
+                }
+            },
+            modifier = Modifier.fillMaxSize(),
+        )
+        val accent = Margin.colors.accent
+        Canvas(Modifier.fillMaxSize()) {
+            val at = router?.penAt ?: return@Canvas
+            if (ink.tool == Tool.Eraser) {
+                val r = if (ink.eraserMode == EraserMode.Area) ink.eraserSizeDp.dp.toPx() / 2f else 8.dp.toPx()
+                drawCircle(Color.White.copy(alpha = 0.35f), r, at)
+                drawCircle(Color(0xFF57524D), r, at, style = Stroke(1.5.dp.toPx()))
+            } else {
+                val style = ink.currentStyle ?: return@Canvas
+                val r = (style.size * state.scale / 2f).coerceAtLeast(2.5.dp.toPx())
+                drawCircle(Color(style.color).copy(alpha = 0.55f), r, at)
+                drawCircle(accent.copy(alpha = 0.0f), r, at)
+            }
+        }
+    }
+}
+
 @Composable
 private fun ReaderTopBar(
     title: String,
@@ -189,10 +306,12 @@ private fun ReaderTopBar(
     pagesOpen: Boolean,
     onBack: () -> Unit,
     onPages: () -> Unit,
+    onToggleLock: () -> Unit,
     onShare: () -> Unit,
 ) {
     val c = Margin.colors
     val page by remember(state) { derivedStateOf { state?.currentPage ?: 0 } }
+    val locked = state?.zoomLocked == true
     Column(Modifier.background(c.background).windowInsetsPadding(WindowInsets.statusBars)) {
         Row(
             Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 8.dp),
@@ -207,6 +326,11 @@ private fun ReaderTopBar(
                     color = c.textMuted, fontSize = 12.sp,
                 )
             }
+            IconBtn(
+                if (locked) MIcons.Lock else MIcons.Unlock,
+                if (locked) "Unlock zoom" else "Lock zoom",
+                onToggleLock, active = locked, enabled = state != null,
+            )
             IconBtn(MIcons.Pages, if (pagesOpen) "Hide pages" else "Show pages", onPages, active = pagesOpen, enabled = state != null)
             IconBtn(MIcons.Share, "Share", onShare)
         }
@@ -214,7 +338,7 @@ private fun ReaderTopBar(
     }
 }
 
-/** "3 / 24" — shows while you scroll, fades away when you stop. */
+/** "3 / 24": shows while you scroll, fades away when you stop. */
 @Composable
 private fun PagePill(state: ViewerState, modifier: Modifier = Modifier) {
     val page by remember(state) { derivedStateOf { state.currentPage } }
@@ -228,7 +352,7 @@ private fun PagePill(state: ViewerState, modifier: Modifier = Modifier) {
     }
     AnimatedVisibility(
         visible = visible,
-        modifier = modifier.windowInsetsPadding(WindowInsets.navigationBars).padding(bottom = 20.dp),
+        modifier = modifier.padding(top = 12.dp),
         enter = fadeIn(tween(120)) + scaleIn(tween(160), initialScale = 0.92f),
         exit = fadeOut(tween(350)),
     ) {
