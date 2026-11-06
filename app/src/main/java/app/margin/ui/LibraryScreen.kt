@@ -140,7 +140,7 @@ fun LibraryScreen(onOpen: (String) -> Unit) {
             Header(query, { query = it }, { showSettings = true })
         }
         val u = update
-        if (u is Updater.Status.Available || u is Updater.Status.Downloading) {
+        if (u is Updater.Status.Available) {
             item(key = "update", span = full) { UpdateBanner(u, Modifier.animateItem()) }
         }
         if (last == null) {
@@ -225,7 +225,7 @@ private fun Header(query: String, onQuery: (String) -> Unit, onSettings: () -> U
 }
 
 @Composable
-private fun UpdateBanner(status: Updater.Status, modifier: Modifier = Modifier) {
+private fun UpdateBanner(status: Updater.Status.Available, modifier: Modifier = Modifier) {
     val c = Margin.colors
     val ctx = LocalContext.current
     Row(
@@ -237,20 +237,14 @@ private fun UpdateBanner(status: Updater.Status, modifier: Modifier = Modifier) 
         Column(Modifier.weight(1f)) {
             Text("A new version of Margin is ready", color = c.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             Text(
-                when (status) {
-                    is Updater.Status.Downloading -> "Downloading… ${(status.progress * 100).toInt()}%"
-                    is Updater.Status.Available -> "Build ${status.build} · you have build ${Updater.currentBuild}"
-                    else -> ""
-                },
+                "Build ${status.build} · you have build ${Updater.currentBuild}. It downloads in Chrome; tap the download to install.",
                 color = c.textMuted, fontSize = 13.sp,
             )
         }
-        if (status is Updater.Status.Available) {
-            Button(
-                onClick = { Updater.downloadAndInstall(ctx) },
-                colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.onAccent),
-            ) { Text("Update", fontWeight = FontWeight.SemiBold) }
-        }
+        Button(
+            onClick = { Updater.openDownload(ctx) },
+            colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.onAccent),
+        ) { Text("Download", fontWeight = FontWeight.SemiBold) }
     }
 }
 
@@ -450,14 +444,13 @@ private fun SettingsDialog(onDismiss: () -> Unit) {
                     val s = status
                     OutlinedButton(
                         onClick = { Updater.check(ctx, force = true) },
-                        enabled = s !is Updater.Status.Checking && s !is Updater.Status.Downloading,
+                        enabled = s !is Updater.Status.Checking,
                     ) { Text("Check for updates") }
                     Text(
                         when (s) {
                             Updater.Status.Checking -> "Checking…"
                             Updater.Status.UpToDate -> "You're up to date"
                             is Updater.Status.Available -> "Build ${s.build} is available"
-                            is Updater.Status.Downloading -> "Downloading…"
                             is Updater.Status.Failed -> s.message
                             Updater.Status.Idle -> ""
                         },

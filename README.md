@@ -8,7 +8,7 @@ A personal PDF reader and S Pen note app for an Android tablet (Galaxy Tab, Andr
 
 1. On the tablet, open this repo's **Releases** page and download the newest `margin-build-N.apk`.
 2. Tap the download. The first time, Android asks to **allow Chrome to install apps**: allow it, go back, tap Install.
-3. After that, update from inside the app: a banner appears in the library when a new build is out. You can also check from **Settings › Check for updates**.
+3. After that, the library shows a banner when a new build is out. Tap **Download**: Chrome downloads it, and you tap the download to install. You can also check from **Settings › Check for updates**. The app itself only asks for internet access and never installs anything on its own.
 
 ## One-time setup: signing key (GitHub Secrets)
 
