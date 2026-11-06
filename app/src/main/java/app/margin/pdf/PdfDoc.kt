@@ -113,6 +113,10 @@ class PdfDoc private constructor(
                     throw PasswordProtectedException()
                 }
                 val count = doc.countPages()
+                if (count == 0) {
+                    doc.destroy()
+                    throw IOException("This PDF has no pages.")
+                }
                 val sizes = ArrayList<PageSize>(count)
                 val origins = ArrayList<Pair<Float, Float>>(count)
                 for (i in 0 until count) {
