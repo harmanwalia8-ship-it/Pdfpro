@@ -88,7 +88,9 @@ class InkController(ctx: Context, docId: String) {
 
     // ---- Drawing ----
     val textures = StockTextureBitmapStore(ctx.resources)
-    val renderer: CanvasStrokeRenderer = CanvasStrokeRenderer.create(textures)
+
+    /** Emulators' software graphics can't draw Ink's GPU meshes, so they use plain paths. */
+    val renderer: CanvasStrokeRenderer = CanvasStrokeRenderer.create(isEmulator, textures)
     private val families = HashMap<PenType, BrushFamily>()
 
     /** Brush for [style]; [scale] multiplies the size (screen pixels per page point for live ink). */
@@ -255,6 +257,10 @@ class InkController(ctx: Context, docId: String) {
     }
 
     companion object {
+        val isEmulator: Boolean = android.os.Build.HARDWARE.contains("ranchu") ||
+            android.os.Build.HARDWARE.contains("goldfish") || android.os.Build.FINGERPRINT.contains("generic") ||
+            android.os.Build.PRODUCT.contains("sdk")
+
         /** One PDF point in centimetres: tells brushes the real size of a stroke unit. */
         const val PT_CM = 2.54f / 72f
 

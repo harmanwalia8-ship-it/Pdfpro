@@ -280,9 +280,12 @@ private fun InkSurface(state: ViewerState, ink: InkController, onDownAnywhere: (
             factory = { context ->
                 InProgressStrokesView(context).apply {
                     textureBitmapStore = ink.textures
-                    // Emulators can't do the low-latency front-buffer drawing; real tablets keep it.
-                    @Suppress("DEPRECATION")
-                    if (isEmulator()) useHighLatencyRenderHelper = true
+                    // Emulators can't do low-latency front-buffer drawing or GPU meshes; real tablets keep both.
+                    if (InkController.isEmulator) {
+                        @Suppress("DEPRECATION")
+                        useHighLatencyRenderHelper = true
+                        rendererFactory = { ink.renderer }
+                    }
                     eagerInit()
                     router = InputRouter(state, ink, this, host, scope, density) { downAnywhere() }
                 }
@@ -462,10 +465,6 @@ private fun Message(text: String, onBack: () -> Unit, modifier: Modifier) {
         TextButton(onClick = onBack, modifier = Modifier.padding(top = 8.dp)) { Text("Back to library") }
     }
 }
-
-private fun isEmulator(): Boolean =
-    android.os.Build.HARDWARE.contains("ranchu") || android.os.Build.HARDWARE.contains("goldfish") ||
-        android.os.Build.FINGERPRINT.contains("generic") || android.os.Build.PRODUCT.contains("sdk")
 
 private fun share(ctx: Context, uri: Uri, title: String) {
     val send = Intent(Intent.ACTION_SEND)
