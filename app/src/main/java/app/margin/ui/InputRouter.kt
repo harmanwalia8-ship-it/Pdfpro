@@ -2,6 +2,7 @@ package app.margin.ui
 
 import android.graphics.Matrix
 import android.os.SystemClock
+import android.util.Log
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
@@ -17,6 +18,7 @@ import androidx.ink.authoring.InProgressStrokeId
 import androidx.ink.authoring.InProgressStrokesFinishedListener
 import androidx.ink.authoring.InProgressStrokesView
 import androidx.ink.strokes.Stroke
+import app.margin.BuildConfig
 import app.margin.ink.EraserMode
 import app.margin.ink.InkController
 import app.margin.ink.PenStyle
@@ -51,7 +53,8 @@ class InputRouter(
     private val slop = ViewConfiguration.get(host.context).scaledTouchSlop.toFloat()
     private val maxFling = ViewConfiguration.get(host.context).scaledMaximumFlingVelocity.toFloat()
     private val decay = splineBasedDecay<Float>(Density(density))
-    private var lastPenAt = 0L
+    /** When the pen was last touching or hovering (device uptime). Starts as "never". */
+    private var lastPenAt = Long.MIN_VALUE / 4
     private var swallow = false
 
     init {
@@ -83,6 +86,9 @@ class InputRouter(
         when (action) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
                 val i = ev.actionIndex
+                if (BuildConfig.DEBUG) {
+                    Log.d("MarginInput", "down tool=${ev.getToolType(i)} major=${ev.getTouchMajor(i)} pen=$penPointer sincePen=${SystemClock.uptimeMillis() - lastPenAt}")
+                }
                 if (isPen(ev, i)) penDown(ev, i) else fingerDown(ev, i)
             }
             MotionEvent.ACTION_MOVE -> {
@@ -118,7 +124,7 @@ class InputRouter(
         if (penPointer >= 0) return
         endNavigation(fling = false) // the pen wins over a resting palm
         penPointer = ev.getPointerId(i)
-        lastPenAt = ev.eventTime
+        lastPenAt = SystemClock.uptimeMillis()
         val at = Offset(ev.getX(i), ev.getY(i))
         penAt = at
         val style = ink.currentStyle
@@ -140,7 +146,7 @@ class InputRouter(
     private fun penMove(ev: MotionEvent) {
         val i = ev.findPointerIndex(penPointer)
         if (i < 0) return
-        lastPenAt = ev.eventTime
+        lastPenAt = SystemClock.uptimeMillis()
         penAt = Offset(ev.getX(i), ev.getY(i))
         if (erasing) {
             for (h in 0 until ev.historySize) eraseTo(Offset(ev.getHistoricalX(i, h), ev.getHistoricalY(i, h)))
@@ -151,7 +157,7 @@ class InputRouter(
     }
 
     private fun penUp(ev: MotionEvent) {
-        lastPenAt = ev.eventTime
+        lastPenAt = SystemClock.uptimeMillis()
         if (erasing) ink.endErase() else strokeId?.let { strokes.finishStroke(ev, penPointer, it) }
         strokeId = null
         penPointer = -1
@@ -219,7 +225,8 @@ class InputRouter(
     private fun fingerDown(ev: MotionEvent, i: Int) {
         val now = ev.eventTime
         val palm = ev.getTouchMajor(i) > 56f * density
-        if (penPointer >= 0 || now - lastPenAt < 400 || palm) return // palm rejection
+        // Palm rejection: ignore fingers while the pen is touching, hovering or just lifted.
+        if (penPointer >= 0 || SystemClock.uptimeMillis() - lastPenAt < 400 || palm) return
         fling?.cancel()
         if (nav.isEmpty()) {
             tapStart = now
