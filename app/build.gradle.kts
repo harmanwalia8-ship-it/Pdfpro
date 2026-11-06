@@ -21,8 +21,7 @@ android {
         versionCode = buildNumber
         versionName = "0.1.$buildNumber"
         buildConfigField("String", "UPDATE_REPO", "\"harmanwalia8-ship-it/pdfpro\"")
-        // Galaxy Tabs are arm64; leaving out other CPU types keeps the APK small.
-        ndk { abiFilters += listOf("arm64-v8a") }
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
@@ -40,6 +39,9 @@ android {
         release {
             isMinifyEnabled = false
             signingConfig = signingConfigs.getByName(if (keystorePath != null) "release" else "debug")
+            // Galaxy Tabs are arm64; leaving out other CPU types keeps the APK small.
+            // (Debug builds keep all of them so they also run on the x86_64 test emulator.)
+            ndk { abiFilters += listOf("arm64-v8a") }
         }
     }
 
@@ -76,4 +78,10 @@ dependencies {
     implementation("com.artifex.mupdf:fitz:1.28.5")
 
     testImplementation("junit:junit:4.13.2")
+
+    androidTestImplementation(composeBom)
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    androidTestImplementation("androidx.test:runner:1.7.0")
+    androidTestImplementation("androidx.test:core-ktx:1.7.0")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
 }
