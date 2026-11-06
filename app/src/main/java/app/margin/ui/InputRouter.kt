@@ -18,6 +18,7 @@ import androidx.ink.authoring.InProgressStrokeId
 import androidx.ink.authoring.InProgressStrokesFinishedListener
 import androidx.ink.authoring.InProgressStrokesView
 import androidx.ink.strokes.Stroke
+import androidx.ink.strokes.StrokeInput
 import app.margin.BuildConfig
 import app.margin.ink.EraserMode
 import app.margin.ink.InkController
@@ -25,6 +26,7 @@ import app.margin.ink.PenStyle
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.min
 
@@ -60,7 +62,14 @@ class InputRouter(
     init {
         strokes.addFinishedStrokesListener(object : InProgressStrokesFinishedListener {
             override fun onStrokesFinished(strokes: Map<InProgressStrokeId, Stroke>) {
-                strokes.forEach { (id, stroke) -> pending.remove(id)?.let { (page, style) -> ink.addFinished(page, style, stroke) } }
+                strokes.forEach { (id, stroke) ->
+                    val p = pending.remove(id) ?: return@forEach
+                    val pts = toPagePoints(stroke, p.viewToPage)
+                    if (BuildConfig.DEBUG) {
+                        Log.d("MarginInput", "finished page=${p.page} points=${pts.size / 4} first=(${pts.getOrNull(0)}, ${pts.getOrNull(1)})")
+                    }
+                    if (pts.size >= 4) ink.addFinished(p.page, p.style, pts)
+                }
                 // Our page layer draws them from the next frame on; then the live layer can let go.
                 this@InputRouter.strokes.postOnAnimation { this@InputRouter.strokes.removeFinishedStrokes(strokes.keys) }
             }
@@ -118,7 +127,28 @@ class InputRouter(
     private var erasing = false
     private var erasePage = -1
     private var lastErase = Offset.Zero
-    private val pending = HashMap<InProgressStrokeId, Pair<Int, PenStyle>>()
+    private class Pending(val page: Int, val style: PenStyle, val viewToPage: Matrix)
+    private val pending = HashMap<InProgressStrokeId, Pending>()
+
+    /** The finished live stroke is in screen pixels; store it in page points. */
+    private fun toPagePoints(stroke: Stroke, viewToPage: Matrix): FloatArray {
+        val inputs = stroke.inputs
+        val n = inputs.size
+        val out = FloatArray(n * 4)
+        val xy = FloatArray(2)
+        val tmp = StrokeInput()
+        for (i in 0 until n) {
+            inputs.populate(i, tmp)
+            xy[0] = tmp.x
+            xy[1] = tmp.y
+            viewToPage.mapPoints(xy)
+            out[i * 4] = xy[0]
+            out[i * 4 + 1] = xy[1]
+            out[i * 4 + 2] = tmp.pressure
+            out[i * 4 + 3] = tmp.elapsedTimeMillis.toFloat()
+        }
+        return out
+    }
 
     private fun penDown(ev: MotionEvent, i: Int) {
         if (penPointer >= 0) return
@@ -138,9 +168,11 @@ class InputRouter(
         }
         val page = pageAt(at) ?: return
         host.requestUnbufferedDispatch(ev)
-        val id = strokes.startStroke(ev, penPointer, ink.brush(style!!), viewToPage(page))
+        // The live stroke is drawn in screen pixels, so its brush is scaled to the current zoom.
+        val id = strokes.startStroke(ev, penPointer, ink.brush(style!!, state.scale))
         strokeId = id
-        pending[id] = page to style
+        pending[id] = Pending(page, style, viewToPage(page))
+        if (BuildConfig.DEBUG) Log.d("MarginInput", "pen down page=$page at=$at scale=${state.scale}")
     }
 
     private fun penMove(ev: MotionEvent) {
@@ -249,12 +281,13 @@ class InputRouter(
         val d = c - centroid
         val locked = state.zoomLocked
         val twoPlus = nav.size >= 2
-        travel += d.getDistance()
+        val newSpan = if (twoPlus) spanOf(c) else 0f
+        // A pinch barely moves the fingers' midpoint, so the spread counts as movement too.
+        travel += d.getDistance() + if (twoPlus && span > 0f) abs(newSpan - span) else 0f
         if (!panning && travel > slop) panning = true
         if (panning && (!locked || twoPlus)) {
-            if (!locked && twoPlus && span > 0f) {
-                val newSpan = spanOf(c)
-                if (newSpan > 0f) state.zoomBy(newSpan / span, c)
+            if (!locked && twoPlus && span > 0f && newSpan > 0f) {
+                state.zoomBy(newSpan / span, c)
                 span = newSpan
                 pinched = true
             }

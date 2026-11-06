@@ -91,7 +91,8 @@ class InkController(ctx: Context, docId: String) {
     val renderer: CanvasStrokeRenderer = CanvasStrokeRenderer.create(textures)
     private val families = HashMap<PenType, BrushFamily>()
 
-    fun brush(style: PenStyle): Brush {
+    /** Brush for [style]; [scale] multiplies the size (screen pixels per page point for live ink). */
+    fun brush(style: PenStyle, scale: Float = 1f): Brush {
         val family = families.getOrPut(style.type) {
             when (style.type) {
                 PenType.Ballpoint, PenType.Marker -> StockBrushes.marker()
@@ -101,7 +102,7 @@ class InkController(ctx: Context, docId: String) {
             }
         }
         val color = if (style.type == PenType.Highlighter) (style.color and 0x00FFFFFF) or 0x73000000 else style.color
-        return Brush.createWithColorIntArgb(family, color, style.size, 0.05f)
+        return Brush.createWithColorIntArgb(family, color, style.size * scale, 0.05f * scale)
     }
 
     /** The drawable stroke for [s], built on first use. */
@@ -118,21 +119,9 @@ class InkController(ctx: Context, docId: String) {
     }
 
     // ---- Changes ----
-    /** A pen stroke the user just finished (already in page points). */
-    fun addFinished(page: Int, style: PenStyle, stroke: Stroke) {
-        val inputs = stroke.inputs
-        val pts = FloatArray(inputs.size * InkStroke.STRIDE)
-        val tmp = StrokeInput()
-        for (i in 0 until inputs.size) {
-            inputs.populate(i, tmp)
-            val o = i * InkStroke.STRIDE
-            pts[o] = tmp.x
-            pts[o + 1] = tmp.y
-            pts[o + 2] = tmp.pressure
-            pts[o + 3] = tmp.elapsedTimeMillis.toFloat()
-        }
-        val s = InkStroke(nextId++, style, pts).also { it.rendered = stroke }
-        commit(mapOf(page to strokes(page) + s))
+    /** A pen stroke the user just finished: x, y, pressure, time per point, in page points. */
+    fun addFinished(page: Int, style: PenStyle, pts: FloatArray) {
+        commit(mapOf(page to strokes(page) + InkStroke(nextId++, style, pts)))
     }
 
     private var eraseBefore: HashMap<Int, List<InkStroke>>? = null

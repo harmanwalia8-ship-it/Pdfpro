@@ -79,6 +79,7 @@ class SmokeTest {
             }
             shotWhenPageShowsText("04-reader-scrolled")
 
+            val textBeforeZoom = textPixels(instrumentation.uiAutomation.takeScreenshot())
             compose.onRoot().performTouchInput {
                 pinch(
                     start0 = center - Offset(60f, 0f), end0 = center - Offset(360f, 0f),
@@ -88,13 +89,16 @@ class SmokeTest {
             }
             settle(3000) // includes the sharp re-render of the zoomed area
             shotWhenPageShowsText("05-reader-zoomed") // zoomed-in pages must still show their text
+            val textZoomed = textPixels(instrumentation.uiAutomation.takeScreenshot())
+            check(textZoomed > textBeforeZoom * 1.3f) { "Pinching didn't zoom in ($textBeforeZoom -> $textZoomed text pixels)" }
 
-            compose.onRoot().performTouchInput { doubleClick(center) }
+            compose.onRoot().performTouchInput { doubleClick(center) } // back to fit-width
             settle(1200)
 
             // ---- S Pen: write, erase, undo. Fingers never write (the flick above left no ink). ----
             val before = blueInk()
             penStroke(zigzag())
+            settle(1500) // well after the pen lifts: the ink must stay on the page
             val written = waitForBlueInk { it > before + 250 }
             shot("06-pen-stroke")
 
