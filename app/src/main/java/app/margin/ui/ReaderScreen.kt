@@ -68,6 +68,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.foundation.layout.offset
+import kotlin.math.roundToInt
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
@@ -262,12 +269,14 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
                     Box(Modifier.fillMaxSize().graphicsLayer { translationX = shift.toPx() }) {
                         DocumentViewer(doc, s, ink)
                         key(s) {
-                            InkSurface(s, ink, onDownAnywhere = {
+                            var router by remember { mutableStateOf<InputRouter?>(null) }
+                            InkSurface(s, ink, onRouter = { router = it }, onDownAnywhere = {
                                 if (panel != null) {
                                     panel = null
                                     true
                                 } else false
                             })
+                            router?.let { SelectionBar(it, ink) }
                         }
                     }
                     PagePill(s, Modifier.align(Alignment.TopCenter))
@@ -315,7 +324,7 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
  */
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
-private fun InkSurface(state: ViewerState, ink: InkController, onDownAnywhere: () -> Boolean) {
+private fun InkSurface(state: ViewerState, ink: InkController, onRouter: (InputRouter) -> Unit, onDownAnywhere: () -> Boolean) {
     val scope = rememberCoroutineScope()
     val host = LocalView.current
     val density = LocalDensity.current.density
@@ -346,7 +355,9 @@ private fun InkSurface(state: ViewerState, ink: InkController, onDownAnywhere: (
                         rendererFactory = { ink.renderer }
                     }
                     eagerInit()
-                    router = InputRouter(state, ink, this, host, scope, density) { downAnywhere() }
+                    val r = InputRouter(state, ink, this, host, scope, density) { downAnywhere() }
+                    router = r
+                    onRouter(r)
                 }
             },
             modifier = Modifier.fillMaxSize(),
@@ -354,7 +365,27 @@ private fun InkSurface(state: ViewerState, ink: InkController, onDownAnywhere: (
         val accent = Margin.colors.accent
         // Own layer: moving the cursor redraws only the cursor, not the pages under it.
         Canvas(Modifier.fillMaxSize().graphicsLayer()) {
-            val at = router?.penAt ?: return@Canvas
+            val r = router ?: return@Canvas
+            val dash = PathEffect.dashPathEffect(floatArrayOf(6.dp.toPx(), 5.dp.toPx()))
+            // The lasso being drawn
+            r.lassoVersion
+            if (r.lasso.size > 1) {
+                val path = Path().apply {
+                    moveTo(r.lasso[0].x, r.lasso[0].y)
+                    for (k in 1 until r.lasso.size) lineTo(r.lasso[k].x, r.lasso[k].y)
+                }
+                drawPath(path, accent.copy(alpha = 0.06f))
+                drawPath(path, accent, style = Stroke(1.5.dp.toPx(), pathEffect = dash))
+            }
+            // The selection: dashed box with a round resize handle at its bottom-right corner
+            r.selectionOnScreen()?.let { b ->
+                val corner = CornerRadius(8.dp.toPx())
+                drawRoundRect(accent.copy(alpha = 0.05f), Offset(b.left, b.top), Size(b.width, b.height), corner)
+                drawRoundRect(accent, Offset(b.left, b.top), Size(b.width, b.height), corner, style = Stroke(1.5.dp.toPx(), pathEffect = dash))
+                drawCircle(Color.White, 9.dp.toPx(), Offset(b.right, b.bottom))
+                drawCircle(accent, 9.dp.toPx(), Offset(b.right, b.bottom), style = Stroke(2.dp.toPx()))
+            }
+            val at = r.penAt ?: return@Canvas
             if (ink.tool == Tool.Eraser) {
                 val r = if (ink.eraserMode == EraserMode.Area) ink.eraserSizeDp.dp.toPx() / 2f else 8.dp.toPx()
                 drawCircle(Color.White.copy(alpha = 0.35f), r, at)
@@ -367,6 +398,60 @@ private fun InkSurface(state: ViewerState, ink: InkController, onDownAnywhere: (
             }
         }
     }
+}
+
+/** Actions for the lasso selection (recolor, duplicate, delete), just above the selection. */
+@Composable
+private fun SelectionBar(router: InputRouter, ink: InkController) {
+    val c = Margin.colors
+    var colors by remember { mutableStateOf(false) }
+    LaunchedEffect(ink.selection) { colors = false }
+    val last = remember { floatArrayOf(0f, 0f) }
+    Box(Modifier.fillMaxSize()) {
+        androidx.compose.animation.AnimatedVisibility(
+            visible = ink.selection != null && !router.dragging,
+            enter = fadeIn(tween(120)) + scaleIn(tween(180, easing = EaseOutSmooth), initialScale = 0.92f),
+            exit = fadeOut(tween(100)),
+            modifier = Modifier.offset {
+                router.selectionOnScreen()?.let { b ->
+                    val gap = 10.dp.toPx()
+                    val barH = 48.dp.toPx()
+                    last[0] = b.left.coerceAtLeast(8.dp.toPx())
+                    last[1] = if (b.top - gap - barH > 8.dp.toPx()) b.top - gap - barH else b.bottom + gap
+                }
+                IntOffset(last[0].roundToInt(), last[1].roundToInt())
+            },
+        ) {
+            Row(
+                Modifier.shadow(10.dp, RoundedCornerShape(24.dp)).background(c.surface, RoundedCornerShape(24.dp)).padding(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (colors) {
+                    PEN_COLORS.forEach { col ->
+                        Box(
+                            Modifier.padding(5.dp).size(30.dp).clip(CircleShape).background(Color(col))
+                                .clickable(onClickLabel = "Recolor") {
+                                    ink.recolorSelection(col)
+                                    colors = false
+                                },
+                        )
+                    }
+                } else {
+                    BarChip("Color") { colors = true }
+                    BarChip("Duplicate") { ink.duplicateSelection() }
+                    BarChip("Delete", c.danger) { ink.deleteSelection() }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BarChip(text: String, color: Color = Margin.colors.text, onClick: () -> Unit) {
+    Box(
+        Modifier.height(40.dp).clip(CircleShape).clickable(onClickLabel = text, onClick = onClick).padding(horizontal = 16.dp),
+        contentAlignment = Alignment.Center,
+    ) { Text(text, color = color, fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
 }
 
 @Composable

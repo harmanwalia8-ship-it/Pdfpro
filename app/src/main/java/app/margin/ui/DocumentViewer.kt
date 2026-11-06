@@ -31,6 +31,7 @@ import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import app.margin.ink.InkController
+import app.margin.ink.InkStroke
 import app.margin.ink.PenType
 import app.margin.pdf.PdfDoc
 import kotlinx.coroutines.delay
@@ -104,6 +105,7 @@ private fun PageView(doc: PdfDoc, state: ViewerState, ink: InkController?, cache
     val fade = remember(index) { Animatable(if (base != null) 1f else 0f) }
     val imagePaint = remember(index) { Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG) }
     val inkMatrix = remember(index) { Matrix() }
+    val selMatrix = remember(index) { Matrix() }
 
     LaunchedEffect(index, targetWidth) {
         val have = base
@@ -183,9 +185,28 @@ private fun PageView(doc: PdfDoc, state: ViewerState, ink: InkController?, cache
                             // Ink's renderer only uses the transform as a quality hint; the canvas
                             // itself must be moved and scaled onto the page.
                             nc.concat(inkMatrix)
+                            // A selection being moved or resized is drawn at its live position.
+                            val sel = ink.selection?.takeIf { it.page == index }
+                            val t = ink.selTransform
+                            val moving = sel != null && !t.isIdentity
+                            if (sel != null && moving) {
+                                selMatrix.setTranslate(-sel.bounds.left, -sel.bounds.top)
+                                selMatrix.postScale(t.scale, t.scale)
+                                selMatrix.postTranslate(sel.bounds.left + t.dx, sel.bounds.top + t.dy)
+                            }
+                            fun drawStroke(st: InkStroke) {
+                                if (sel != null && moving && st.id in sel.ids) {
+                                    nc.save()
+                                    nc.concat(selMatrix)
+                                    ink.renderer.draw(nc, ink.inkStroke(st), inkMatrix)
+                                    nc.restore()
+                                } else {
+                                    ink.renderer.draw(nc, ink.inkStroke(st), inkMatrix)
+                                }
+                            }
                             // Highlighter first, so pen ink always sits on top of it.
-                            for (st in strokes) if (st.style.type == PenType.Highlighter) ink.renderer.draw(nc, ink.inkStroke(st), inkMatrix)
-                            for (st in strokes) if (st.style.type != PenType.Highlighter) ink.renderer.draw(nc, ink.inkStroke(st), inkMatrix)
+                            for (st in strokes) if (st.style.type == PenType.Highlighter) drawStroke(st)
+                            for (st in strokes) if (st.style.type != PenType.Highlighter) drawStroke(st)
                             nc.restore()
                         }
                     }

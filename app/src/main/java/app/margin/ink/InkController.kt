@@ -31,7 +31,7 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-enum class Tool { Pen0, Pen1, Pen2, Highlighter, Eraser }
+enum class Tool { Pen0, Pen1, Pen2, Highlighter, Eraser, Lasso }
 enum class EraserMode { Area, Stroke }
 
 /**
@@ -51,15 +51,21 @@ class InkController(ctx: Context, docId: String) {
     var eraserMode by mutableStateOf(EraserMode.Area)
     var eraserSizeDp by mutableFloatStateOf(32f)
 
-    /** Style for the current tool, or null when erasing. */
+    /** Style for the current tool, or null for the eraser and lasso. */
     val currentStyle: PenStyle?
         get() = when (tool) {
             Tool.Pen0 -> pens[0]
             Tool.Pen1 -> pens[1]
             Tool.Pen2 -> pens[2]
             Tool.Highlighter -> highlighter
-            Tool.Eraser -> null
+            Tool.Eraser, Tool.Lasso -> null
         }
+
+    /** Picks a tool; anything selected with the lasso is let go. */
+    fun selectTool(t: Tool) {
+        tool = t
+        clearSelection()
+    }
 
     fun updateCurrentStyle(change: (PenStyle) -> PenStyle) {
         when (tool) {
@@ -67,8 +73,73 @@ class InkController(ctx: Context, docId: String) {
             Tool.Pen1 -> pens[1] = change(pens[1])
             Tool.Pen2 -> pens[2] = change(pens[2])
             Tool.Highlighter -> highlighter = change(highlighter)
-            Tool.Eraser -> Unit
+            Tool.Eraser, Tool.Lasso -> Unit
         }
+    }
+
+    // ---- Lasso selection ----
+    class Selection(val page: Int, val ids: Set<Long>, val bounds: Bounds)
+
+    var selection by mutableStateOf<Selection?>(null)
+        private set
+
+    /** Live move / resize while dragging the selection; applied to the strokes when the drag ends. */
+    var selTransform by mutableStateOf(SelTransform())
+        private set
+
+    /** Selects the strokes on [page] that are mostly inside [polygon] (x, y pairs, page points). */
+    fun selectInLasso(page: Int, polygon: FloatArray): Boolean {
+        val picked = strokes(page).filter { SelectionMath.fractionInside(it, polygon) >= 0.5f }
+        selection = if (picked.isEmpty()) null else Selection(page, picked.mapTo(HashSet()) { it.id }, SelectionMath.bounds(picked))
+        selTransform = SelTransform()
+        return selection != null
+    }
+
+    fun clearSelection() {
+        if (selection != null) selection = null
+        if (!selTransform.isIdentity) selTransform = SelTransform()
+    }
+
+    fun previewSelection(t: SelTransform) {
+        selTransform = t
+    }
+
+    /** Ends a move / resize: the strokes take their new place (one undo step). */
+    fun applySelectionTransform() {
+        val sel = selection ?: return
+        val t = selTransform
+        selTransform = SelTransform()
+        if (t.isIdentity) return
+        val after = strokes(sel.page).map { s ->
+            if (s.id in sel.ids) SelectionMath.transform(s, sel.bounds.left, sel.bounds.top, t) else s
+        }
+        commit(mapOf(sel.page to after))
+        selection = Selection(sel.page, sel.ids, SelectionMath.bounds(after.filter { it.id in sel.ids }))
+    }
+
+    fun deleteSelection() {
+        val sel = selection ?: return
+        commit(mapOf(sel.page to strokes(sel.page).filter { it.id !in sel.ids }))
+        selection = null
+    }
+
+    /** Copies the selection a little down and to the right, and selects the copy. */
+    fun duplicateSelection() {
+        val sel = selection ?: return
+        val copies = strokes(sel.page).filter { it.id in sel.ids }.map { s ->
+            val moved = SelectionMath.transform(s, 0f, 0f, SelTransform(12f, 12f, 1f))
+            InkStroke(nextId++, moved.style, moved.pts)
+        }
+        commit(mapOf(sel.page to strokes(sel.page) + copies))
+        selection = Selection(sel.page, copies.mapTo(HashSet()) { it.id }, SelectionMath.bounds(copies))
+    }
+
+    fun recolorSelection(color: Int) {
+        val sel = selection ?: return
+        val after = strokes(sel.page).map { s ->
+            if (s.id in sel.ids && s.style.color != color) InkStroke(s.id, s.style.copy(color = color), s.pts) else s
+        }
+        commit(mapOf(sel.page to after))
     }
 
     // ---- Ink ----
@@ -201,12 +272,14 @@ class InkController(ctx: Context, docId: String) {
 
     fun undo() {
         val e = history.popUndo() ?: return
+        clearSelection()
         e.before.forEach { (p, l) -> pages[p] = l }
         changed()
     }
 
     fun redo() {
         val e = history.popRedo() ?: return
+        clearSelection()
         e.after.forEach { (p, l) -> pages[p] = l }
         changed()
     }

@@ -49,6 +49,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -68,7 +69,7 @@ import app.margin.ink.Tool
 
 enum class TrayPanel { Pen, Highlighter, Eraser }
 
-private val PEN_COLORS = listOf(
+internal val PEN_COLORS = listOf(
     0xFF1C1B1A, 0xFF1F3A93, 0xFF2B6CDB, 0xFFC62828, 0xFF2E7D32, 0xFFE65100, 0xFF6A1B9A, 0xFF6D5D52,
 ).map { it.toInt() }
 private val HL_COLORS = listOf(0xFFFFD54A, 0xFF8BE28E, 0xFF8FD3FF, 0xFFFF9EBB, 0xFFFFB870).map { it.toInt() }
@@ -121,9 +122,9 @@ fun PenTray(
 @Composable
 private fun Tray(ink: InkController, panel: TrayPanel?, onPanel: (TrayPanel?) -> Unit) {
     val c = Margin.colors
-    fun tap(tool: Tool, options: TrayPanel) {
+    fun tap(tool: Tool, options: TrayPanel?) {
         if (ink.tool == tool) onPanel(if (panel == null) options else null) else {
-            ink.tool = tool
+            ink.selectTool(tool)
             onPanel(null)
         }
     }
@@ -156,6 +157,9 @@ private fun Tray(ink: InkController, panel: TrayPanel?, onPanel: (TrayPanel?) ->
             }
             Slot("Eraser", ink.tool == Tool.Eraser, { tap(Tool.Eraser, TrayPanel.Eraser) }) {
                 Instrument("Eraser", Color.Unspecified)
+            }
+            Slot("Lasso select", ink.tool == Tool.Lasso, { tap(Tool.Lasso, null) }) {
+                Instrument("Lasso", Color.Unspecified)
             }
             Box(Modifier.padding(horizontal = 8.dp).padding(bottom = 18.dp).size(1.dp, 40.dp).background(c.line))
             Row(Modifier.padding(bottom = 16.dp)) {
@@ -204,6 +208,7 @@ private val PARTS = mapOf(
     "Marker" to Parts(p("M12 50h16v70H12z"), p("M13 50L15 34H25L27 50Z"), p("M15.5 34C15.5 22 24.5 22 24.5 34Z"), p("M12 58h16v10H12z"), p("M14.5 52h2.6v68h-2.6z"), p("")),
     "Highlighter" to Parts(p("M11 52h18v68H11z"), p("M12 52L14 38H26L28 52Z"), p("M14.5 38V28L25.5 21V38Z"), p("M11 60h18v14H11z"), p("M13.5 54h2.6v66h-2.6z"), p("")),
     "Eraser" to Parts(p("M10 40h20v80H10z"), p("M11 40V22A5 5 0 0 1 16 17H24A5 5 0 0 1 29 22V40Z"), p(""), p("M10 46h20v6H10z"), p("M12.5 42h2.6v78h-2.6z"), p("")),
+    "Lasso" to Parts(p("M14 46h12v74H14z"), p("M14 46L18 30H22L26 46Z"), p("M18 30L20 24L22 30Z"), p("M14 52h12v5H14z"), p("M16 48h2.4v72H16z"), p("M20 24C9 21 8 7 20 7C32 7 31 21 20 24")),
 )
 
 @Composable
@@ -220,7 +225,9 @@ private fun Instrument(kind: String, ink: Color) {
         "Fountain" -> { nib = Color(0xFF3A3835); tip = Color(0xFFD8B25A); ring = Color(0xFF8C6A22) }
         "Pencil" -> { body = animatedInk; nib = Color(0xFFEAC995); band = Color(0x2E000000) }
         "Eraser" -> { nib = Color(0xFFF3A8A0); band = Color(0xFFA39D95) }
+        "Lasso" -> { tip = Color(0xFF2B59C3); band = Color(0xFF2B59C3); ring = Color(0xFF2B59C3) }
     }
+    val ringStyle = Stroke(1.4f, pathEffect = if (kind == "Lasso") PathEffect.dashPathEffect(floatArrayOf(3f, 2.4f)) else null)
     Canvas(Modifier.size(34.dp, 102.dp)) {
         scale(size.width / 40f, size.height / 120f, pivot = Offset.Zero) {
             translate1(parts.body) // soft shadow
@@ -231,7 +238,7 @@ private fun Instrument(kind: String, ink: Color) {
             drawPath(parts.tip, tip)
             drawPath(parts.band, band)
             drawPath(parts.hi, Color.White.copy(alpha = 0.55f))
-            drawPath(parts.ring, ring, style = Stroke(1.4f))
+            drawPath(parts.ring, ring, style = ringStyle)
         }
     }
 }

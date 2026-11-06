@@ -28,6 +28,10 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import android.util.Base64
+import org.json.JSONObject
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 /**
  * Walks through the app on a real (emulated) tablet: empty library, opening a PDF,
@@ -120,6 +124,32 @@ class SmokeTest {
             shot("08-pen-options")
             compose.onNodeWithContentDescription("Pen 1: Fountain").performClick()
             settle(500)
+
+            // ---- Lasso: select the zigzag, drag it right, delete it, undo ----
+            compose.onNodeWithContentDescription("Lasso select").performClick()
+            settle(500)
+            val xBefore = blueCenterX()
+            penStroke(loopAroundZigzag())
+            compose.waitUntil(timeoutMillis = 10_000) { compose.onAllNodesWithText("Delete").fetchSemanticsNodes().isNotEmpty() }
+            settle(800)
+            shot("08b-lasso-selected")
+            penStroke(dragRight())
+            settle(1500)
+            val xAfter = blueCenterX()
+            check(xAfter > xBefore + screen.width() * 0.08f) { "Dragging the selection didn't move the ink ($xBefore -> $xAfter)" }
+            compose.onNodeWithText("Delete").performClick()
+            settle(1200)
+            check(blueInk() < before + (written - before) / 4) { "Delete didn't remove the selected ink" }
+            compose.onNodeWithContentDescription("Undo").performClick()
+            waitForBlueInk { it > before + (written - before) / 2 }
+
+            // ---- Hold to snap: a wobbly line, held still at the end, becomes straight ----
+            compose.onNodeWithContentDescription("Pen 1: Fountain").performClick()
+            settle(500)
+            penStroke(wobblyLine(), holdAtEndMs = 2500)
+            settle(1500)
+            checkLastStrokeIsStraight(pdf)
+            shot("08c-snapped-line")
 
             // ---- Zoom lock: one finger does nothing, two fingers scroll ----
             compose.onNodeWithContentDescription("Lock zoom").performClick()
@@ -238,7 +268,7 @@ class SmokeTest {
     }
 
     /** Draws with a simulated S Pen (stylus tool type, real pressure), like a person would. */
-    private fun penStroke(points: List<Offset>) {
+    private fun penStroke(points: List<Offset>, holdAtEndMs: Long = 0) {
         val ui = instrumentation.uiAutomation
         val down = SystemClock.uptimeMillis()
         var t = down
@@ -257,8 +287,87 @@ class SmokeTest {
             t += 8
             send(MotionEvent.ACTION_MOVE, p)
         }
+        if (holdAtEndMs > 0) Thread.sleep(holdAtEndMs) // pen resting on the screen, not moving
         t += 8
         send(MotionEvent.ACTION_UP, points.last())
+    }
+
+    /** A loose loop around the zigzag, for the lasso. */
+    private fun loopAroundZigzag(): List<Offset> {
+        val w = screen.width().toFloat()
+        val h = screen.height().toFloat()
+        val corners = (0..72).map { k ->
+            val a = 2 * Math.PI * k / 72
+            Offset((w * 0.5f + w * 0.21f * Math.cos(a)).toFloat(), (h * 0.45f + h * 0.13f * Math.sin(a)).toFloat())
+        }
+        return dense(corners)
+    }
+
+    /** From the middle of the selection to the right. */
+    private fun dragRight(): List<Offset> {
+        val w = screen.width().toFloat()
+        val h = screen.height().toFloat()
+        return dense(listOf(Offset(w * 0.5f, h * 0.45f), Offset(w * 0.72f, h * 0.45f)))
+    }
+
+    /** A hand-drawn-looking line with a small wobble, below the zigzag. */
+    private fun wobblyLine(): List<Offset> {
+        val w = screen.width().toFloat()
+        val h = screen.height().toFloat()
+        return (0..80).map { k ->
+            val t = k / 80f
+            Offset(w * (0.3f + 0.4f * t), h * (0.60f + 0.03f * t) + (Math.sin(k * 0.9) * 6).toFloat())
+        }
+    }
+
+    /** Average x of the blue (ink and selection) pixels in the band where the zigzag is. */
+    private fun blueCenterX(): Float {
+        compose.waitForIdle()
+        val b = instrumentation.uiAutomation.takeScreenshot() ?: return 0f
+        var sum = 0.0
+        var n = 0
+        for (y in (b.height * 0.36f).toInt() until (b.height * 0.56f).toInt() step 3) {
+            for (x in (b.width * 0.05f).toInt() until (b.width * 0.95f).toInt() step 3) {
+                val c = b.getPixel(x, y)
+                if (Color.blue(c) > 100 && Color.blue(c) > Color.red(c) + 50 && Color.blue(c) > Color.green(c) + 30) {
+                    sum += x
+                    n++
+                }
+            }
+        }
+        return if (n == 0) 0f else (sum / n).toFloat()
+    }
+
+    /** Margin's saved ink (its own file) must end with a straight stroke: the snapped line. */
+    private fun checkLastStrokeIsStraight(pdf: File) {
+        val file = File(ctx.filesDir, "ink/${Library.idFor(Uri.fromFile(pdf))}.json")
+        val end = SystemClock.uptimeMillis() + 8_000
+        var worst = Float.MAX_VALUE
+        while (SystemClock.uptimeMillis() < end) {
+            runCatching {
+                val pages = JSONObject(file.readText()).getJSONObject("pages")
+                for (key in pages.keys()) {
+                    val arr = pages.getJSONArray(key)
+                    val last = arr.getJSONObject(arr.length() - 1)
+                    val buf = ByteBuffer.wrap(Base64.decode(last.getString("p"), Base64.NO_WRAP)).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
+                    val pts = FloatArray(buf.remaining()).also { buf.get(it) }
+                    val n = pts.size / 4
+                    if (n < 10) continue
+                    val ax = pts[0]; val ay = pts[1]; val bx = pts[4 * (n - 1)]; val by = pts[4 * (n - 1) + 1]
+                    val len = Math.hypot((bx - ax).toDouble(), (by - ay).toDouble()).toFloat()
+                    if (len < 50f) continue
+                    var dev = 0f
+                    for (i in 0 until n) {
+                        val d = Math.abs((by - ay) * pts[4 * i] - (bx - ax) * pts[4 * i + 1] + bx * ay - by * ax) / len
+                        dev = maxOf(dev, d)
+                    }
+                    worst = minOf(worst, dev)
+                    if (dev < 0.5f) return
+                }
+            }
+            Thread.sleep(500)
+        }
+        error("No straight stroke was saved after holding the pen (closest was $worst pt off a line)")
     }
 
     /** Counts blue (pen-ink) pixels on the page area of the screen. */
