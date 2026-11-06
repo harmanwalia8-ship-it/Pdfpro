@@ -71,7 +71,7 @@ class SmokeTest {
             // A quick flick moves the finger half a screen; only a glide after lifting it
             // can carry the view off page 1.
             compose.onRoot().performTouchInput {
-                swipeUp(startY = bottom * 0.8f, endY = bottom * 0.3f, durationMillis = 120)
+                swipeUp(startY = bottom * 0.7f, endY = bottom * 0.2f, durationMillis = 120)
             }
             settle(1500)
             check(compose.onAllNodesWithText("Page 1 of 6").fetchSemanticsNodes().isEmpty()) {

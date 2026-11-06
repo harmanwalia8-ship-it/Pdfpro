@@ -173,18 +173,21 @@ private fun Slot(label: String, selected: Boolean, onClick: () -> Unit, content:
         spring(dampingRatio = 0.55f, stiffness = Spring.StiffnessMediumLow),
         label = "rise",
     )
-    Box(
-        Modifier.size(44.dp, 100.dp).clipToBounds()
-            .selectable(
-                selected = selected,
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                role = Role.Tab,
-                onClick = onClick,
-            )
-            .semantics { contentDescription = label },
-    ) {
+    Box(Modifier.size(44.dp, 100.dp).clipToBounds()) {
         Box(Modifier.offset { IntOffset(5.dp.roundToPx(), rise.roundToPx()) }) { content() }
+        // Only the part inside the white tray is tappable: the headroom above it (where a picked
+        // pen rises) stays part of the page, so writing or scrolling just above the tray works.
+        Box(
+            Modifier.align(Alignment.BottomCenter).size(44.dp, 76.dp)
+                .selectable(
+                    selected = selected,
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    role = Role.Tab,
+                    onClick = onClick,
+                )
+                .semantics { contentDescription = label },
+        )
     }
 }
 
