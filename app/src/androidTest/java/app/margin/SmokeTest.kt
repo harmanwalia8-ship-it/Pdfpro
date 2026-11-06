@@ -59,21 +59,22 @@ class SmokeTest {
 
             compose.onNodeWithText("Continue").performClick()
             waitForText("Page 1 of 6")
-            waitForPageText()
-            shot("03-reader-open")
+            // The library fades out; make sure it's gone so its text can't pass for page text.
+            compose.waitUntil(timeoutMillis = 10_000) {
+                compose.onAllNodesWithText("CONTINUE WHERE YOU LEFT OFF").fetchSemanticsNodes().isEmpty()
+            }
+            shotWhenPageShowsText("03-reader-open")
 
-            // One quick flick must keep gliding after the finger lifts: well past page 2.
+            // A quick flick moves the finger half a screen; only a glide after lifting it
+            // can carry the view off page 1.
             compose.onRoot().performTouchInput {
                 swipeUp(startY = bottom * 0.8f, endY = bottom * 0.3f, durationMillis = 120)
             }
             settle(1500)
-            for (p in 1..2) {
-                check(compose.onAllNodesWithText("Page $p of 6").fetchSemanticsNodes().isEmpty()) {
-                    "A quick flick stopped on page $p: scrolling doesn't glide"
-                }
+            check(compose.onAllNodesWithText("Page 1 of 6").fetchSemanticsNodes().isEmpty()) {
+                "A quick flick stayed on page 1: scrolling doesn't glide"
             }
-            waitForPageText()
-            shot("04-reader-scrolled")
+            shotWhenPageShowsText("04-reader-scrolled")
 
             compose.onRoot().performTouchInput {
                 pinch(
@@ -82,10 +83,8 @@ class SmokeTest {
                     durationMillis = 500,
                 )
             }
-            settle(1000)
-            waitForPageText() // zoomed-in pages must still show their text
-            settle(2000) // sharp re-render of the zoomed area
-            shot("05-reader-zoomed")
+            settle(3000) // includes the sharp re-render of the zoomed area
+            shotWhenPageShowsText("05-reader-zoomed") // zoomed-in pages must still show their text
 
             compose.onRoot().performTouchInput { doubleClick(center) }
             settle(1200)
@@ -103,29 +102,35 @@ class SmokeTest {
     }
 
     /**
-     * Waits until the middle of the screen shows page text (grey/black pixels on the white page),
-     * so a page that stays blank fails the test instead of slipping through.
+     * Waits until the middle of the screen shows page text (grey/black pixels on the white page)
+     * on two screenshots in a row, then saves that screenshot. A page that stays blank fails the test.
      */
-    private fun waitForPageText(timeoutMs: Long = 20_000) {
+    private fun shotWhenPageShowsText(name: String, timeoutMs: Long = 20_000) {
         val end = SystemClock.uptimeMillis() + timeoutMs
         var last = 0
+        var hits = 0
         while (SystemClock.uptimeMillis() < end) {
             compose.waitForIdle()
             val bitmap = instrumentation.uiAutomation.takeScreenshot()
             if (bitmap != null) {
                 last = textPixels(bitmap)
-                if (last >= 1500) return
+                hits = if (last >= 1500) hits + 1 else 0
+                if (hits >= 2) {
+                    save(bitmap, name)
+                    return
+                }
             }
-            Thread.sleep(500)
+            Thread.sleep(400)
         }
-        error("The page never showed its text (only $last text pixels on screen)")
+        shot("$name-FAILED")
+        error("$name: the page never showed its text (only $last text pixels on screen)")
     }
 
     /** Counts darkish pixels in the middle of the screen, away from bars and the page pill. */
     private fun textPixels(b: Bitmap): Int {
         var n = 0
         for (y in (b.height * 0.15f).toInt() until (b.height * 0.8f).toInt() step 3) {
-            for (x in (b.width * 0.15f).toInt() until (b.width * 0.85f).toInt() step 3) {
+            for (x in (b.width * 0.2f).toInt() until (b.width * 0.8f).toInt() step 3) {
                 val c = b.getPixel(x, y)
                 val lum = (Color.red(c) * 299 + Color.green(c) * 587 + Color.blue(c) * 114) / 1000
                 if (lum < 130) n++
@@ -148,7 +153,10 @@ class SmokeTest {
     }
 
     private fun shot(name: String) {
-        val bitmap = instrumentation.uiAutomation.takeScreenshot() ?: return
+        instrumentation.uiAutomation.takeScreenshot()?.let { save(it, name) }
+    }
+
+    private fun save(bitmap: Bitmap, name: String) {
         File(shots, "$name.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
     }
 
