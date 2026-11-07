@@ -75,6 +75,9 @@ fun DocumentViewer(doc: PdfDoc, state: ViewerState, ink: InkController?, modifie
     }
 }
 
+/** Largest side of any page image, well inside GPU texture limits (8192 on Adreno 642L). */
+private const val MAX_PAGE_IMAGE_PX = 4096f
+
 private class Patch(val image: ImageBitmap, val rectPt: RectF)
 
 private class PageCache {
@@ -98,7 +101,10 @@ private fun PageView(doc: PdfDoc, state: ViewerState, ink: InkController?, cache
     val targetWidth by remember(index) {
         derivedStateOf {
             val w = pageSize.width * state.scaleAt(state.settledZoom)
-            min(w, state.viewport.width.toFloat()).roundToInt().coerceAtLeast(64)
+            // A GPU can't draw an image taller or wider than its texture limit (8192 px on your
+            // tablet), so very tall pages get a smaller full-page image; the sharp patch covers zoom.
+            val maxForHeight = MAX_PAGE_IMAGE_PX * pageSize.width / pageSize.height
+            minOf(w, state.viewport.width.toFloat(), maxForHeight, MAX_PAGE_IMAGE_PX).roundToInt().coerceAtLeast(16)
         }
     }
     var base by remember(index) { mutableStateOf(cache[index]) }

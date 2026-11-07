@@ -107,7 +107,7 @@ class PdfDoc private constructor(
 
     /** Small preview of a page, [widthPx] wide. */
     suspend fun thumbnail(index: Int, widthPx: Int): Bitmap? =
-        pageSizes.getOrNull(index)?.let { render(index, widthPx / it.width) }
+        pageSizes.getOrNull(index)?.let { render(index, minOf(widthPx / it.width, 4f * widthPx / it.height)) }
 
     /**
      * Adds a [template] page after page [after], the same size as that page.
