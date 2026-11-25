@@ -156,8 +156,10 @@ class EngineTest {
                 assertEquals(1, m.search(4, "B chapter 3").size)
                 assertTrue("A's ink came along", m.savedInk.any { it.page == 1 })
                 val contents = m.outline()
-                assertEquals(listOf("Merge A", "Merge B"), contents.map { it.title })
-                assertEquals(listOf(0, 2), contents.map { it.page })
+                val seen = "contents: " + contents.joinToString { "${it.title} -> page ${it.page}" } +
+                    " (links: " + rawContents(PdfStore.copyFile(ctx, merged.id)) + ")"
+                assertEquals(seen, listOf("Merge A", "Merge B"), contents.map { it.title })
+                assertEquals(seen, listOf(0, 2), contents.map { it.page })
             } finally {
                 m.close()
             }
@@ -167,6 +169,16 @@ class EngineTest {
             merged?.let { PdfStore.delete(ctx, it) }
         }
     }
+
+    /** The merged PDF's table of contents as MuPDF reads it (title=link), to explain a failure. */
+    private fun rawContents(file: File): String = runCatching {
+        val d = com.artifex.mupdf.fitz.Document.openDocument(file.path)
+        try {
+            d.loadOutline().orEmpty().joinToString { "${it.title}=${it.uri}" }
+        } finally {
+            d.destroy()
+        }
+    }.getOrElse { "unreadable: $it" }
 
     /** An A4 PDF made with Android's own PDF writer: "<tag> chapter N" and 38 lines of text per page. */
     private fun samplePdf(file: File, pages: Int, tag: String): File {

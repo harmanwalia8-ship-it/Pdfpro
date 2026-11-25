@@ -9,6 +9,7 @@ import com.artifex.mupdf.fitz.Document
 import com.artifex.mupdf.fitz.Matrix
 import com.artifex.mupdf.fitz.PDFDocument
 import com.artifex.mupdf.fitz.PDFGraftMap
+import com.artifex.mupdf.fitz.PDFObject
 import com.artifex.mupdf.fitz.android.AndroidDrawDevice
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -185,16 +186,18 @@ object PageTools {
     private fun writeMerged(sources: List<File>, titles: List<String>, out: File, thumb: File, onProgress: (Int) -> Unit): Int {
         val merged = PDFDocument()
         try {
-            val starts = ArrayList<Int>()
+            val firstPages = ArrayList<Pair<String, PDFObject>>()
             sources.forEachIndexed { k, file ->
                 val src = Document.openDocument(file.path)
                 try {
                     if (src.needsPassword()) throw PasswordProtectedException()
                     val pdf = src as? PDFDocument ?: throw IOException("Not a PDF")
-                    starts += merged.countPages()
                     val map = merged.newPDFGraftMap()
                     try {
-                        for (i in 0 until pdf.countPages()) copyPage(merged, map, pdf, i)
+                        for (i in 0 until pdf.countPages()) {
+                            val page = copyPage(merged, map, pdf, i)
+                            if (i == 0) firstPages += titles[k] to page
+                        }
                     } finally {
                         map.destroy()
                     }
@@ -204,11 +207,7 @@ object PageTools {
                 onProgress(k + 1)
             }
             // Where each PDF starts, as the merged PDF's table of contents.
-            runCatching {
-                val contents = merged.outlineIterator()
-                titles.forEachIndexed { k, t -> contents.insert(t, "#page=${starts[k] + 1}", false) }
-                contents.destroy()
-            }
+            runCatching { writeContents(merged, firstPages) }
             out.parentFile?.mkdirs()
             val part = File(out.parentFile, out.name + ".part")
             try {
@@ -229,7 +228,7 @@ object PageTools {
      * Links, form fields and pop-ups are left out: they point at pages and fields that don't come along.
      * [src] is changed in memory only (it's never saved).
      */
-    private fun copyPage(dst: PDFDocument, map: PDFGraftMap, src: PDFDocument, i: Int) {
+    private fun copyPage(dst: PDFDocument, map: PDFGraftMap, src: PDFDocument, i: Int): PDFObject {
         val page = src.findPage(i)
         val copy = dst.newDictionary()
         copy.put("Type", dst.newName("Page"))
@@ -249,7 +248,37 @@ object PageTools {
             }
             if (keep.size() > 0) copy.put("Annots", keep)
         }
-        dst.insertPage(dst.countPages(), dst.addObject(copy))
+        val ref = dst.addObject(copy)
+        dst.insertPage(dst.countPages(), ref)
+        return ref
+    }
+
+    /**
+     * A table of contents for [pdf]: one entry per (title, page object). Written directly, pointing at
+     * the pages themselves, so no page has to be looked up by number while the PDF is being built.
+     */
+    private fun writeContents(pdf: PDFDocument, entries: List<Pair<String, PDFObject>>) {
+        if (entries.isEmpty()) return
+        val outlines = pdf.addObject(pdf.newDictionary())
+        outlines.put("Type", pdf.newName("Outlines"))
+        val items = entries.map { (title, page) ->
+            val item = pdf.addObject(pdf.newDictionary())
+            item.put("Title", pdf.newString(title))
+            item.put("Parent", outlines)
+            val dest = pdf.newArray()
+            dest.push(page)
+            dest.push(pdf.newName("Fit"))
+            item.put("Dest", dest)
+            item
+        }
+        items.forEachIndexed { k, item ->
+            if (k > 0) item.put("Prev", items[k - 1])
+            if (k < items.lastIndex) item.put("Next", items[k + 1])
+        }
+        outlines.put("First", items.first())
+        outlines.put("Last", items.last())
+        outlines.put("Count", items.size)
+        pdf.trailer.get("Root").put("Outlines", outlines)
     }
 
     /** Writes pages [range] of [source] to [out] (plus a cover thumbnail). MuPDF thread only. */

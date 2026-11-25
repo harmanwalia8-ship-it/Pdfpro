@@ -340,7 +340,8 @@ class SmokeTest {
             compose.onNodeWithText("Pages").performClick()
             settle(1200)
 
-            compose.onNodeWithContentDescription("Page 1").performTouchInput { longClick() }
+            // The panel opens at the page you're on (3), with page 2 at the top: duplicate page 2.
+            compose.onNodeWithContentDescription("Page 2").performTouchInput { longClick() }
             settle(800)
             compose.onNodeWithText("Duplicate page").performClick()
             compose.waitUntil(timeoutMillis = 20_000) { compose.onAllNodesWithText(" of 7", substring = true).fetchSemanticsNodes().isNotEmpty() }
