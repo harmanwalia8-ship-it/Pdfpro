@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Android 10 and 11 (12+ uses data_extraction_rules.xml): Android's backup and transfer take
+    everything except the untouched-original safety copies, to stay within Google's 25 MB per app.
+-->
+<full-backup-content>
+    <exclude domain="file" path="originals/" />
+</full-backup-content>

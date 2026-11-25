@@ -548,9 +548,11 @@ private fun SettingsDialog(onDismiss: () -> Unit) {
                 )
                 Text("Privacy", color = c.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                 Text(
-                    "Margin has no internet access and isn't included in Android backups. Your PDFs, notes " +
-                        "and ink stay on this tablet, and Margin never changes your original files. They only " +
-                        "leave when you choose Share or Save a copy to Files.",
+                    "Margin has no internet access and never changes your original files. Your PDFs, notes " +
+                        "and ink only leave this tablet when you choose Share or Save a copy to Files, or through " +
+                        "Android's own backup and the transfer to a new tablet (encrypted with your screen lock). " +
+                        "Google's backup skips apps over 25 MB, so for a big library, use the new-tablet transfer " +
+                        "or Save a copy.",
                     color = c.textMuted, fontSize = 13.sp,
                 )
             }

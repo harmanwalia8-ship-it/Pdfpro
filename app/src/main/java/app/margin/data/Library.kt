@@ -43,6 +43,12 @@ data class Doc(
      * opens its copy instead of reading the original again.
      */
     val copyAhead: Boolean = false,
+    /**
+     * Margin has saved ink or page changes into its copy since it was untouched. The untouched-original
+     * backup is only ever taken before that (it isn't in Google backups, so after setting up a new tablet
+     * there may be none, and a later save mustn't pass an inked copy off as the original).
+     */
+    val edited: Boolean = false,
 )
 
 /**
@@ -126,6 +132,7 @@ class Library private constructor(private val ctx: Context) {
                 zoomLocked = o.optBoolean("zoomLocked"),
                 added = o.optLong("added"),
                 copyAhead = o.optBoolean("copyAhead"),
+                edited = o.optBoolean("edited"),
             )
         }.sortedByDescending { maxOf(it.lastOpened, it.added) }
     }.getOrDefault(emptyList())
@@ -142,7 +149,7 @@ class Library private constructor(private val ctx: Context) {
                             .put("pageCount", d.pageCount).put("lastPage", d.lastPage)
                             .put("lastOpened", d.lastOpened).put("starred", d.starred)
                             .put("zoom", d.zoom.toDouble()).put("zoomLocked", d.zoomLocked)
-                            .put("added", d.added).put("copyAhead", d.copyAhead),
+                            .put("added", d.added).put("copyAhead", d.copyAhead).put("edited", d.edited),
                     )
                 }
                 val tmp = File(file.parentFile, "library.json.tmp")

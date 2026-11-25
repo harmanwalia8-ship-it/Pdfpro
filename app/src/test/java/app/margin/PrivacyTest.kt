@@ -6,7 +6,8 @@ import org.junit.Test
 import java.io.File
 
 /**
- * Your PDFs, notes and ink must never leave the tablet unless you Share them or Save a copy.
+ * Margin itself must never send your PDFs, notes or ink anywhere: they only leave when you Share
+ * them or Save a copy, or through Android's own (encrypted) backup and new-tablet transfer.
  * These checks fail the build if a change ever gives Margin a way to send them anywhere.
  * (CI also checks the finished APK has no internet permission, and the emulator test checks
  * that saving never changes the original file.)
@@ -27,18 +28,22 @@ class PrivacyTest {
     }
 
     @Test
-    fun noBackupsOrDeviceTransfer() {
-        assertTrue("allowBackup must be false", "android:allowBackup=\"false\"" in manifest)
-        assertTrue("fullBackupContent must be false", "android:fullBackupContent=\"false\"" in manifest)
-        assertTrue("data extraction rules must be set", "android:dataExtractionRules=\"@xml/data_extraction_rules\"" in manifest)
+    fun androidBackupAndNewTabletTransferStayOn() {
+        // Your own encrypted Android backup and the move to a new tablet are wanted. Google's backup
+        // skips an app entirely above 25 MB, so only the untouched-original safety copies are left out.
+        assertTrue("allowBackup must stay true", "android:allowBackup=\"true\"" in manifest)
+        assertTrue("Android 10-11 rules", "android:fullBackupContent=\"@xml/backup_rules\"" in manifest)
+        assertTrue("Android 12+ rules", "android:dataExtractionRules=\"@xml/data_extraction_rules\"" in manifest)
+        val onlyOriginals = Regex("""<exclude domain="file" path="originals/" />""")
+        val old = File(main, "res/xml/backup_rules.xml").readText()
+        assertEquals("Android 10-11 leaves out only originals/", 1, Regex("<exclude").findAll(old).count())
+        assertTrue(onlyOriginals.containsMatchIn(old))
         val rules = File(main, "res/xml/data_extraction_rules.xml").readText()
-        for (section in listOf("cloud-backup", "device-transfer")) {
-            val body = rules.substringAfter("<$section>").substringBefore("</$section>")
-            assertTrue("$section must not include anything", "<include" !in body)
-            for (domain in listOf("root", "file", "database", "sharedpref", "external")) {
-                assertTrue("$section must exclude $domain", "<exclude domain=\"$domain\" path=\".\" />" in body)
-            }
-        }
+        val cloud = rules.substringAfter("<cloud-backup>").substringBefore("</cloud-backup>")
+        assertEquals("Google backup leaves out only originals/", 1, Regex("<exclude").findAll(cloud).count())
+        assertTrue(onlyOriginals.containsMatchIn(cloud))
+        assertTrue("nothing limits the transfer to a new tablet", "<device-transfer" !in rules)
+        assertTrue("no include lists (they'd leave the rest out)", "<include" !in old + rules)
     }
 
     @Test

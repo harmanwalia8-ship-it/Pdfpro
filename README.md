@@ -2,7 +2,7 @@
 
 A personal PDF reader and S Pen note app for an Android tablet (Galaxy Tab, Android 10+).
 
-**Status:** reader + S Pen writing + notebooks + page tools. Private by design: no internet access, nothing leaves the tablet unless you share it.
+**Status:** reader + S Pen writing + notebooks + page tools. Private by design: no internet access, and Margin never sends your notes anywhere.
 
 - Read: continuous pages, fling, pinch / double-tap zoom, pages sidebar, remembers your page and zoom.
 - Write: pen tray (ballpoint, fountain pen, pencil, marker, highlighter), area and stroke eraser, undo/redo, S Pen side button erases, palm rejection, zoom lock (two-finger scrolling).
@@ -14,12 +14,12 @@ A personal PDF reader and S Pen note app for an Android tablet (Galaxy Tab, Andr
 
 ## Privacy
 
-Your PDFs, notes and ink stay on the tablet. They only leave when you choose **Share** or **Save a copy to Files**.
+Margin itself never sends your PDFs, notes or ink anywhere. They only leave the tablet when you choose **Share** or **Save a copy to Files**, or through Android's own backup and new-tablet transfer.
 
 - **No internet access.** The app doesn't have Android's internet permission, so Android itself blocks it from sending anything. Checking for updates just opens the Releases page in Chrome.
-- **No backups or transfers.** Margin's data is left out of Android's Google Drive backup and out of device-to-device transfers. The flip side: uninstalling Margin, or losing the tablet, loses what's only in Margin. Use **Save a copy to Files** for anything you want to keep elsewhere.
+- **Android backup and new-tablet transfer are on.** When you set up a new tablet from the old one, your whole library comes along. Android's Google backup is encrypted with your screen lock, but Google takes at most 25 MB per app and skips the app entirely above that. The untouched-original copies behind "Restore original PDF" are left out to save room, but a library of big PDFs will still go over. For that, rely on the new-tablet transfer, or **Save a copy to Files**.
 - **Your original files are never changed.** Margin only reads them. Your ink goes into Margin's own copy, so a PDF in Google Drive or OneDrive never gets your notes uploaded.
-- **Checked on every build.** `PrivacyTest` fails the build if internet access, backups, network code or new writes outside the app appear. CI also checks the finished APK has no internet permission. The emulator test checks that saving leaves the original file byte-for-byte unchanged.
+- **Checked on every build.** `PrivacyTest` fails the build if internet access, network code or new writes outside the app appear, or if the backup settings change. CI also checks the finished APK has no internet permission. The emulator test checks that saving leaves the original file byte-for-byte unchanged.
 
 ## Install on the tablet
 

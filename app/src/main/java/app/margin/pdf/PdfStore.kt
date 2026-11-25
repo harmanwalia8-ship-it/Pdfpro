@@ -94,13 +94,15 @@ object PdfStore {
                 val library = Library.get(ctx)
                 val doc = library.get(docId) ?: return@withContext Result.Failed // deleted from Margin meanwhile
                 val backup = backupFile(ctx, docId)
-                if (!backup.exists() && copy.exists()) {
+                if (!backup.exists() && !doc.edited && copy.exists()) {
                     // First time Margin writes into this PDF: keep the untouched one.
                     replace(backup) { out -> copy.inputStream().use { it.copyTo(out) } }
                 }
                 if (!part.renameTo(copy)) throw IOException("Can't update Margin's copy")
                 // From now on Margin's copy is the one to open; the original doesn't have your changes.
-                if (doc.uri != null && !doc.copyAhead) library.update(docId) { it.copy(copyAhead = true) }
+                if (!doc.edited || (doc.uri != null && !doc.copyAhead)) {
+                    library.update(docId) { it.copy(edited = true, copyAhead = it.uri != null) }
+                }
                 Result.Saved
             }
         } catch (e: CancellationException) {
@@ -121,8 +123,9 @@ object PdfStore {
             if (!backup.exists()) return@withContext false
             runCatching {
                 replace(copyFile(ctx, docId)) { out -> backup.inputStream().use { it.copyTo(out) } }
-                // Keep opening the restored copy: an original written by an older Margin may still hold ink.
-                if (doc.uri != null) library.update(docId) { it.copy(copyAhead = true) }
+                // Untouched again (the next save keeps a new backup), but keep opening this copy:
+                // an original written by an older Margin may still hold ink.
+                library.update(docId) { it.copy(edited = false, copyAhead = doc.uri != null) }
                 library.inkFile(docId).delete()
                 backup.delete()
             }.isSuccess
