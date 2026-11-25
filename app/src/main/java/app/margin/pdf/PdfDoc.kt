@@ -248,12 +248,10 @@ class PdfDoc private constructor(
         val pdf = doc as? PDFDocument ?: return@withContext false
         if (index !in pageSizes.indices) return@withContext false
         val src = pdf.findPage(index)
-        val copy = pdf.newDictionary()
-        copy.put("Type", pdf.newName("Page"))
+        val copy = newPageObject(pdf)
         for (key in PAGE_KEYS) inherited(src, key)?.let { copy.put(key, it) }
-        val ref = pdf.addObject(copy)
         dropLoadedPages()
-        pdf.insertPage(index + 1, ref)
+        pdf.insertPage(index + 1, copy)
         remapMarked { PageMoves.afterInsert(it, index + 1) }
         reloadPageInfo()
         true
@@ -396,6 +394,14 @@ class PdfDoc private constructor(
 
         /** What a page needs to look the same; the rest (annotations, links, parent) isn't copied. */
         internal val PAGE_KEYS = listOf("MediaBox", "CropBox", "BleedBox", "TrimBox", "ArtBox", "Rotate", "UserUnit", "Resources", "Contents", "Group")
+
+        /**
+         * A new page object in [pdf], not yet in its page tree, to copy a page's look into (see PAGE_KEYS).
+         * Made with addPage, which returns a proper reference to it. (MuPDF's Java addObject returns the
+         * unreferenced object instead, so a page tree or table of contents built with it breaks.)
+         */
+        internal fun newPageObject(pdf: PDFDocument): PDFObject =
+            pdf.addPage(com.artifex.mupdf.fitz.Rect(0f, 0f, A4_WIDTH, A4_HEIGHT), 0, pdf.newDictionary(), "")
 
         /** A page attribute, looked up through the page tree where pages inherit it (MediaBox, Rotate...). */
         internal fun inherited(page: PDFObject, key: String): PDFObject? {

@@ -18,7 +18,9 @@ import app.margin.pdf.PdfStore
 import app.margin.pdf.SavedImage
 import app.margin.pdf.SavedText
 import app.margin.pdf.TextForPdf
+import app.margin.pdf.Mupdf
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -81,6 +83,7 @@ class EngineTest {
         assertTrue(doc.saveWithInk(emptyMap(), emptyMap(), out))
         doc.close()
 
+        assertEquals("every page is a proper page object", listOf(true, true, true, true), pagesAreReferences(out))
         val again = PdfDoc.open(out)
         try {
             assertEquals(4, again.pageCount)
@@ -148,6 +151,7 @@ class EngineTest {
 
             merged = PageTools.merge(ctx, listOf(library.get(docA.id)!!, library.get(docB.id)!!), "Merged test")
             assertEquals(5, merged.pageCount)
+            assertEquals("every page is a proper page object", List(5) { true }, pagesAreReferences(PdfStore.copyFile(ctx, merged.id)))
             val m = PdfDoc.open(PdfStore.copyFile(ctx, merged.id))
             try {
                 assertEquals(5, m.pageCount)
@@ -157,7 +161,7 @@ class EngineTest {
                 assertTrue("A's ink came along", m.savedInk.any { it.page == 1 })
                 val contents = m.outline()
                 val seen = "contents: " + contents.joinToString { "${it.title} -> page ${it.page}" } +
-                    " (links: " + rawContents(PdfStore.copyFile(ctx, merged.id)) + ")"
+                    " (links: " + withContext(Mupdf.dispatcher) { rawContents(PdfStore.copyFile(ctx, merged.id)) } + ")"
                 assertEquals(seen, listOf("Merge A", "Merge B"), contents.map { it.title })
                 assertEquals(seen, listOf(0, 2), contents.map { it.page })
             } finally {
@@ -170,7 +174,17 @@ class EngineTest {
         }
     }
 
-    /** The merged PDF's table of contents as MuPDF reads it (title=link), to explain a failure. */
+    /** For each page of [file]: is it in the page tree as a reference to a page object (as it must be)? */
+    private suspend fun pagesAreReferences(file: File): List<Boolean> = withContext(Mupdf.dispatcher) {
+        val d = com.artifex.mupdf.fitz.Document.openDocument(file.path) as com.artifex.mupdf.fitz.PDFDocument
+        try {
+            List(d.countPages()) { d.findPage(it).isIndirect }
+        } finally {
+            d.destroy()
+        }
+    }
+
+    /** The merged PDF's table of contents as MuPDF reads it (title=link), to explain a failure. MuPDF thread. */
     private fun rawContents(file: File): String = runCatching {
         val d = com.artifex.mupdf.fitz.Document.openDocument(file.path)
         try {
