@@ -37,6 +37,12 @@ object MIcons {
     val Redo = line("M15 14l5-5-5-5 M20 9H9.5a5.5 5.5 0 0 0 0 11H13")
     val Lock = line("M6.5 11h11a1.5 1.5 0 0 1 1.5 1.5v6a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 18.5v-6A1.5 1.5 0 0 1 6.5 11z M8.5 11V8a3.5 3.5 0 0 1 7 0v3")
     val Unlock = line("M6.5 11h11a1.5 1.5 0 0 1 1.5 1.5v6a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 18.5v-6A1.5 1.5 0 0 1 6.5 11z M8.5 11V8a3.5 3.5 0 0 1 6.8-1.2")
+    val Scissors = line(
+        "M6.5 3.5a2.75 2.75 0 1 0 0 5.5a2.75 2.75 0 1 0 0-5.5z M6.5 15a2.75 2.75 0 1 0 0 5.5a2.75 2.75 0 1 0 0-5.5z" +
+            "M8.9 7.6L19.5 18 M8.9 16.4L19.5 6",
+    )
+    val NewPage = line("M7 3.5h7l4.5 4.5v12.5H7z M14 3.5V8h4.5 M12.75 11v6 M9.75 14h6")
+    val SaveFile = line("M7 3.5h7l4.5 4.5v12.5H7z M14 3.5V8h4.5 M12.75 11v6.5 M10 14.75l2.75 2.75 2.75-2.75")
 
     private fun line(d: String) = build(d, fill = false)
     private fun filled(d: String) = build(d, fill = true)

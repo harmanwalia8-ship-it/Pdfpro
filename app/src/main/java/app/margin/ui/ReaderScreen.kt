@@ -3,7 +3,6 @@ package app.margin.ui
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
-import android.net.Uri
 import android.util.LruCache
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
@@ -97,19 +96,20 @@ import app.margin.data.Library
 import app.margin.ink.EraserMode
 import app.margin.ink.InkController
 import app.margin.ink.Tool
+import androidx.core.content.FileProvider
 import app.margin.pdf.PasswordProtectedException
 import app.margin.pdf.PdfDoc
-import app.margin.pdf.PdfSaver
+import app.margin.pdf.PdfStore
 import app.margin.pdf.PageTemplate
+import app.margin.pdf.pdfFileName
+import java.io.File
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.lifecycle.Lifecycle
@@ -138,6 +138,12 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
     var pdf by remember(docId) { mutableStateOf<PdfDoc?>(null) }
     var error by remember(docId) { mutableStateOf<String?>(null) }
     val ink = remember(docId) { InkController(ctx, docId) }
+    var hint by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(hint) {
+        val h = hint ?: return@LaunchedEffect
+        delay(if (h.length > 40) 4000 else 2200)
+        hint = null
+    }
 
     LaunchedEffect(docId) {
         if (entry == null) {
@@ -147,7 +153,11 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
         library.markOpened(docId)
         ink.load()
         try {
-            val doc = PdfDoc.open(ctx, Uri.parse(entry.uri), workName = docId)
+            // Margin reads its own copy (refreshed from the original when it can), so the PDF
+            // still opens after the original is deleted.
+            val kept = PdfStore.prepare(ctx, docId)
+            if (kept.originalMissing) hint = "Can't find the original file · showing Margin's copy"
+            val doc = PdfDoc.open(kept.file)
             ink.importSaved(doc.savedInk) // e.g. after reinstalling: the ink is still in the PDF
             pdf = doc
         } catch (e: CancellationException) {
@@ -162,19 +172,18 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
             error = "Couldn't open this PDF."
         }
     }
-    // ---- Saving your ink into the PDF file itself ----
-    var saveState by remember(docId) { mutableStateOf<PdfSaver.Result?>(null) }
+    // ---- Saving your ink into the PDF file itself (Margin's copy, and the original when it can) ----
+    var saveState by remember(docId) { mutableStateOf<PdfStore.Result?>(null) }
     var saving by remember(docId) { mutableStateOf(false) }
-    val uri = remember(docId) { entry?.let { Uri.parse(it.uri) } }
     suspend fun saveIntoFile() {
         val doc = pdf ?: return
-        if (uri == null || !ink.pdfDirty || saving) return
+        if (!ink.pdfDirty || saving) return
         val v = ink.version
         saving = true
-        val r = PdfSaver.save(ctx, docId, uri, doc, ink.forPdf())
+        val r = PdfStore.save(ctx, docId, doc, ink.forPdf())
         saving = false
         saveState = r
-        if (r == PdfSaver.Result.Saved) ink.markWrittenToPdf(v)
+        if (r == PdfStore.Result.Saved || r == PdfStore.Result.SavedCopyOnly) ink.markWrittenToPdf(v)
     }
     // After 20 quiet seconds...
     LaunchedEffect(ink.version, pdf) {
@@ -198,7 +207,7 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
         onDispose {
             ink.flush()
             appScope.launch {
-                if (doc != null && uri != null && ink.pdfDirty) PdfSaver.save(ctx, docId, uri, doc, ink.forPdf())
+                if (doc != null && ink.pdfDirty) PdfStore.save(ctx, docId, doc, ink.forPdf())
                 doc?.close()
             }
         }
@@ -231,14 +240,8 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
     }
 
     var showPages by rememberSaveable(docId) { mutableStateOf(false) }
+    var showPageTools by remember(docId) { mutableStateOf(false) }
     var panel by remember { mutableStateOf<TrayPanel?>(null) }
-    var hint by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(hint) {
-        if (hint != null) {
-            delay(2200)
-            hint = null
-        }
-    }
     /** Adds or deletes pages in the PDF itself, moves the ink with its pages, then saves. */
     fun editPages(goTo: Int, edit: suspend (PdfDoc) -> Boolean, moveInk: () -> Unit) {
         val doc = pdf ?: return
@@ -267,15 +270,17 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
             state = state,
             status = when {
                 saving -> "Saving…"
-                ink.pdfDirty && saveState == PdfSaver.Result.ReadOnly -> "Can't save into this file; ink kept in Margin"
-                ink.pdfDirty && saveState == PdfSaver.Result.Failed -> "Not saved yet"
+                ink.pdfDirty && saveState == PdfStore.Result.ReadOnly -> "Can't save into this file; ink kept in Margin"
+                ink.pdfDirty && saveState == PdfStore.Result.Failed -> "Not saved yet"
                 ink.pdfDirty -> null
-                saveState == PdfSaver.Result.Saved -> "Saved"
+                saveState == PdfStore.Result.Saved -> "Saved"
+                saveState == PdfStore.Result.SavedCopyOnly -> "Saved in Margin (the original file can't be updated)"
                 else -> null
             },
             pagesOpen = showPages,
             onBack = onBack,
             onPages = { showPages = !showPages },
+            onPageTools = { showPageTools = true },
             onToggleLock = {
                 state?.let { s ->
                     s.zoomLocked = !s.zoomLocked
@@ -286,11 +291,27 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
                 entry?.let { e ->
                     scope.launch {
                         saveIntoFile() // share the file with your latest ink in it
-                        share(ctx, Uri.parse(e.uri), e.title)
+                        share(ctx, PdfStore.copyFile(ctx, docId), e.title)
                     }
                 }
             },
         )
+        val toolsFor = pdf
+        if (showPageTools && entry != null && toolsFor != null) {
+            PageToolsDialog(
+                doc = entry,
+                pageCount = toolsFor.pageCount,
+                source = {
+                    saveIntoFile() // the new PDFs get your latest ink and page changes
+                    PdfStore.copyFile(ctx, docId)
+                },
+                onMade = { made ->
+                    showPageTools = false
+                    hint = if (made.size == 1) "Made a new PDF · it's in your library" else "Made ${made.size} PDFs · they're in your library"
+                },
+                onDismiss = { showPageTools = false },
+            )
+        }
         Box(Modifier.fillMaxWidth().weight(1f).background(c.desk)) {
             val doc = pdf
             val s = state
@@ -507,6 +528,7 @@ private fun ReaderTopBar(
     pagesOpen: Boolean,
     onBack: () -> Unit,
     onPages: () -> Unit,
+    onPageTools: () -> Unit,
     onToggleLock: () -> Unit,
     onShare: () -> Unit,
 ) {
@@ -533,6 +555,7 @@ private fun ReaderTopBar(
                 onToggleLock, active = locked, enabled = state != null,
             )
             IconBtn(MIcons.Pages, if (pagesOpen) "Hide pages" else "Show pages", onPages, active = pagesOpen, enabled = state != null)
+            IconBtn(MIcons.Scissors, "Extract or split pages", onPageTools, enabled = state != null && state.pageCount > 1)
             IconBtn(MIcons.Share, "Share", onShare)
         }
         HorizontalDivider(thickness = 1.dp, color = c.line)
@@ -714,58 +737,11 @@ private fun AddPageDialog(after: Int, onAdd: (PageTemplate) -> Unit, onDismiss: 
         containerColor = c.surface,
         title = { Text("Add page after page ${after + 1}", color = c.text, fontWeight = FontWeight.SemiBold) },
         text = {
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                PageTemplate.entries.forEach { t ->
-                    val on = t == pick
-                    val shape = RoundedCornerShape(12.dp)
-                    Column(
-                        Modifier.clip(shape).background(if (on) c.accentSoft else Color.Transparent)
-                            .border(1.5.dp, if (on) c.accent else c.line, shape)
-                            .selectable(selected = on, role = Role.RadioButton) { pick = t }
-                            .padding(10.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        TemplatePreview(t, Modifier.size(52.dp, 70.dp))
-                        Text(t.name, fontSize = 12.sp, color = if (on) c.text else c.textMuted)
-                    }
-                }
-            }
+            PaperPicker(pick, onPick = { pick = it })
         },
         confirmButton = { TextButton(onClick = { onAdd(pick) }) { Text("Add page") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
-}
-
-@Composable
-private fun TemplatePreview(t: PageTemplate, modifier: Modifier) {
-    Canvas(modifier.shadow(1.dp, RoundedCornerShape(3.dp)).background(Color.White, RoundedCornerShape(3.dp))) {
-        val step = size.width / 7f
-        when (t) {
-            PageTemplate.Blank -> Unit
-            PageTemplate.Lined -> {
-                var y = step * 1.6f
-                while (y < size.height - step * 0.5f) {
-                    drawLine(Color(0xFFC2D1F0), Offset(step * 0.6f, y), Offset(size.width - step * 0.6f, y), 1.dp.toPx())
-                    y += step
-                }
-            }
-            PageTemplate.Grid -> {
-                var x = step
-                while (x < size.width) { drawLine(Color(0xFFDDDAD5), Offset(x, 0f), Offset(x, size.height), 1f); x += step }
-                var y = step
-                while (y < size.height) { drawLine(Color(0xFFDDDAD5), Offset(0f, y), Offset(size.width, y), 1f); y += step }
-            }
-            PageTemplate.Dotted -> {
-                var y = step
-                while (y < size.height) {
-                    var x = step
-                    while (x < size.width) { drawCircle(Color(0xFFB8B3AC), 1.2.dp.toPx(), Offset(x, y)); x += step }
-                    y += step
-                }
-            }
-        }
-    }
 }
 
 /** The view to restore after the page layout is rebuilt. */
@@ -792,7 +768,14 @@ private fun Message(text: String, onBack: () -> Unit, modifier: Modifier) {
 /** Saving outlives the reader screen, so leaving a PDF never cuts a save short. */
 private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
-private fun share(ctx: Context, uri: Uri, title: String) {
+/** Shares Margin's copy of the PDF ([file]) under its own name, so it works even when the original is gone. */
+private suspend fun share(ctx: Context, file: File, title: String) {
+    val named = runCatching {
+        withContext(Dispatchers.IO) {
+            File(ctx.cacheDir, "share").apply { mkdirs() }.resolve(pdfFileName(title)).also { file.copyTo(it, overwrite = true) }
+        }
+    }.getOrNull() ?: return
+    val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.files", named)
     val send = Intent(Intent.ACTION_SEND)
         .setType("application/pdf")
         .putExtra(Intent.EXTRA_STREAM, uri)

@@ -1,10 +1,9 @@
 package app.margin.pdf
 
-import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Rect
-import android.net.Uri
+import com.artifex.mupdf.fitz.Device
 import com.artifex.mupdf.fitz.Document
 import com.artifex.mupdf.fitz.Matrix
 import com.artifex.mupdf.fitz.PDFAnnotation
@@ -42,7 +41,6 @@ class SavedInk(val page: Int, val points: FloatArray, val color: Int, val width:
 enum class PageTemplate { Blank, Lined, Grid, Dotted }
 
 class PdfDoc private constructor(
-    private val work: File,
     private val doc: Document,
     sizes: List<PageSize>,
     origins: List<Pair<Float, Float>>,
@@ -88,16 +86,7 @@ class PdfDoc private constructor(
         val (x0, y0) = origins[index]
         val device = AndroidDrawDevice(bitmap, (x0 * scale).roundToInt() + r.left, (y0 * scale).roundToInt() + r.top)
         try {
-            val page = page(index)
-            val ctm = Matrix(scale, scale)
-            if (page is PDFPage) {
-                // Margin's own ink is drawn (editable) by the ink layer, so skip it here.
-                page.runPageContents(device, ctm, null)
-                page.annotations?.forEach { a -> if (!isMargin(a)) a.run(device, ctm, null) }
-                page.runPageWidgets(device, ctm, null)
-            } else {
-                page.run(device, ctm)
-            }
+            drawWithoutMarginInk(page(index), device, Matrix(scale, scale))
             device.close()
         } finally {
             device.destroy()
@@ -161,53 +150,12 @@ class PdfDoc private constructor(
         pageSizes = sizes
     }
 
-    /** The drawing commands for a new page (PDF coordinates: origin bottom-left). */
-    private fun templateContent(t: PageTemplate, w: Float, h: Float): String = buildString {
-        when (t) {
-            PageTemplate.Blank -> Unit
-            PageTemplate.Lined -> {
-                append("0.76 0.82 0.94 RG 0.6 w\n")
-                var y = h - 72f
-                while (y > 40f) {
-                    append("36 $y m ${w - 36f} $y l S\n")
-                    y -= 24f
-                }
-            }
-            PageTemplate.Grid -> {
-                append("0.87 0.86 0.84 RG 0.4 w\n")
-                var x = 20f
-                while (x < w) {
-                    append("$x 0 m $x $h l S\n")
-                    x += 20f
-                }
-                var y = 20f
-                while (y < h) {
-                    append("0 $y m $w $y l S\n")
-                    y += 20f
-                }
-            }
-            PageTemplate.Dotted -> {
-                append("0.72 0.70 0.67 rg\n")
-                var y = 20f
-                while (y < h) {
-                    var x = 20f
-                    while (x < w) {
-                        append("${x - 0.7f} ${y - 0.7f} 1.4 1.4 re f\n")
-                        x += 20f
-                    }
-                    y += 20f
-                }
-            }
-        }
-    }
-
     override fun close() {
         closed = true
         CoroutineScope(Mupdf.dispatcher).launch {
             pages.values.forEach { it.destroy() }
             pages.clear()
             doc.destroy()
-            work.delete()
         }
     }
 
@@ -253,28 +201,100 @@ class PdfDoc private constructor(
     companion object {
         const val MARGIN = "Margin"
 
+        /** A4 in PDF points: the page size of new notebooks. */
+        const val A4_WIDTH = 595f
+        const val A4_HEIGHT = 842f
+
+        /**
+         * Writes a new one-page PDF with [template] paper to [out] (a notebook to write in).
+         * More pages are added in the reader, like in any PDF.
+         */
+        suspend fun createBlank(out: File, template: PageTemplate, width: Float = A4_WIDTH, height: Float = A4_HEIGHT) =
+            withContext(Mupdf.dispatcher) {
+                val pdf = PDFDocument()
+                try {
+                    val page = pdf.addPage(
+                        com.artifex.mupdf.fitz.Rect(0f, 0f, width, height), 0, pdf.newDictionary(),
+                        templateContent(template, width, height),
+                    )
+                    pdf.insertPage(0, page)
+                    out.parentFile?.mkdirs()
+                    val part = File(out.parentFile, out.name + ".part")
+                    try {
+                        pdf.save(part.path, "garbage")
+                        if (!part.renameTo(out)) throw IOException("Can't save the new notebook")
+                    } finally {
+                        part.delete()
+                    }
+                } finally {
+                    pdf.destroy()
+                }
+            }
+
+        /** The drawing commands for a new page (PDF coordinates: origin bottom-left). */
+        private fun templateContent(t: PageTemplate, w: Float, h: Float): String = buildString {
+            when (t) {
+                PageTemplate.Blank -> Unit
+                PageTemplate.Lined -> {
+                    append("0.76 0.82 0.94 RG 0.6 w\n")
+                    var y = h - 72f
+                    while (y > 40f) {
+                        append("36 $y m ${w - 36f} $y l S\n")
+                        y -= 24f
+                    }
+                }
+                PageTemplate.Grid -> {
+                    append("0.87 0.86 0.84 RG 0.4 w\n")
+                    var x = 20f
+                    while (x < w) {
+                        append("$x 0 m $x $h l S\n")
+                        x += 20f
+                    }
+                    var y = 20f
+                    while (y < h) {
+                        append("0 $y m $w $y l S\n")
+                        y += 20f
+                    }
+                }
+                PageTemplate.Dotted -> {
+                    append("0.72 0.70 0.67 rg\n")
+                    var y = 20f
+                    while (y < h) {
+                        var x = 20f
+                        while (x < w) {
+                            append("${x - 0.7f} ${y - 0.7f} 1.4 1.4 re f\n")
+                            x += 20f
+                        }
+                        y += 20f
+                    }
+                }
+            }
+        }
+
         private fun isMargin(a: PDFAnnotation): Boolean =
             a.type == PDFAnnotation.TYPE_INK && runCatching { a.hasAuthor() && a.author == MARGIN }.getOrDefault(false)
 
+        /** Draws [page] except Margin's own ink, which the ink layer draws (editable) on top. MuPDF thread only. */
+        internal fun drawWithoutMarginInk(page: Page, device: Device, ctm: Matrix) {
+            if (page is PDFPage) {
+                page.runPageContents(device, ctm, null)
+                page.annotations?.forEach { a -> if (!isMargin(a)) a.run(device, ctm, null) }
+                page.runPageWidgets(device, ctm, null)
+            } else {
+                page.run(device, ctm)
+            }
+        }
+
         /**
-         * Opens a private working copy of the PDF. Viewing the copy lets Margin safely
-         * rewrite the original file (with your ink) while you keep reading.
+         * Opens [file] (Margin's copy of the PDF, see PdfStore). Saving replaces that file with a
+         * new one, which is safe while it's open: MuPDF keeps reading the file it opened.
          */
-        suspend fun open(ctx: Context, uri: Uri, workName: String): PdfDoc = withContext(Mupdf.dispatcher) {
-            val work = File(ctx.cacheDir, "work/$workName.pdf").apply { parentFile?.mkdirs() }
-            ctx.contentResolver.openInputStream(uri)?.use { input -> work.outputStream().use { input.copyTo(it) } }
-                ?: throw IOException("Can't read this file.")
+        suspend fun open(file: File): PdfDoc = withContext(Mupdf.dispatcher) {
+            val doc = Document.openDocument(file.path)
             try {
-                val doc = Document.openDocument(work.path)
-                if (doc.needsPassword()) {
-                    doc.destroy()
-                    throw PasswordProtectedException()
-                }
+                if (doc.needsPassword()) throw PasswordProtectedException()
                 val count = doc.countPages()
-                if (count == 0) {
-                    doc.destroy()
-                    throw IOException("This PDF has no pages.")
-                }
+                if (count == 0) throw IOException("This PDF has no pages.")
                 val sizes = ArrayList<PageSize>(count)
                 val origins = ArrayList<Pair<Float, Float>>(count)
                 val saved = ArrayList<SavedInk>()
@@ -288,9 +308,9 @@ class PdfDoc private constructor(
                     }
                     p.destroy()
                 }
-                PdfDoc(work, doc, sizes, origins, saved)
+                PdfDoc(doc, sizes, origins, saved)
             } catch (t: Throwable) {
-                work.delete()
+                doc.destroy()
                 throw t
             }
         }

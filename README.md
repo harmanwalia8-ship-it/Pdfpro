@@ -2,11 +2,15 @@
 
 A personal PDF reader and S Pen note app for an Android tablet (Galaxy Tab, Android 10+).
 
-**Status:** reader + S Pen writing + saving into the PDF.
+**Status:** reader + S Pen writing + saving into the PDF + notebooks + page tools.
 
 - Read: continuous pages, fling, pinch / double-tap zoom, pages sidebar, remembers your page and zoom.
 - Write: pen tray (ballpoint, fountain pen, pencil, marker, highlighter), area and stroke eraser, undo/redo, S Pen side button erases, palm rejection, zoom lock (two-finger scrolling).
-- Save: your ink is written into the original PDF as standard ink annotations (so other apps show it) when you leave the PDF, when the app goes to the background, and after 20 s without new strokes. Before the first save Margin keeps a backup of the untouched original; long-press a PDF in the library to restore it.
+- Keep: Margin keeps its own copy of every PDF you open, so it stays in the library even if you delete or move the original. Each time you open a PDF, Margin refreshes its copy from the original if it can still read it.
+- Save: your ink is written into Margin's copy and into the original PDF (when the original is still there and can be changed) as standard ink annotations, so other apps show it. Saving happens when you leave the PDF, when the app goes to the background, and after 20 s without new strokes. Before the first save Margin keeps a backup of the untouched PDF; long-press a PDF in the library to restore it.
+- New notes: start a blank notebook (blank, lined, grid or dotted A4 paper) from the library, write in it, and add pages from the pages panel.
+- Page tools (✂ in the reader, or long-press in the library): **keep pages**, e.g. pages 1–200 as a new PDF, or **split** into PDFs of N pages each. The new PDFs appear in the library; the PDF they came from isn't changed.
+- Long-press a PDF in the library for: **Save a copy to Files**, to put a PDF made in Margin (or any PDF, with your ink) into Files or Drive, and **Delete from Margin**, which deletes Margin's copy, your ink and the backup for good. The original file is never touched.
 
 ## Install on the tablet
 
@@ -33,10 +37,12 @@ Keep a backup of the keystore file and password somewhere safe. If they're lost,
 - [MuPDF](https://mupdf.com) renders pages (AGPL; this is a personal, open-source app).
 - `app/src/main/java/app/margin/`
   - `pdf/PdfDoc.kt` opens and renders PDFs on a single MuPDF thread.
+  - `pdf/PdfStore.kt` keeps Margin's copy of each PDF (`files/docs/`) in step with the original: open, save, backup and restore, export, delete.
+  - `pdf/PageTools.kt` makes new PDFs: blank notebooks, a kept page range, or a split into parts.
   - `ui/ViewerState.kt` holds the page layout, scroll and zoom math (unit-tested).
   - `ui/DocumentViewer.kt` handles gestures and page rendering, with sharp re-renders after zooming.
   - `ui/LibraryScreen.kt` and `ui/ReaderScreen.kt` are the two screens.
-  - `data/Library.kt` keeps the list of recent PDFs (a small JSON file).
+  - `data/Library.kt` keeps the list of PDFs in the library (a small JSON file).
   - `update/Updater.kt` provides the in-app update from GitHub Releases.
 - `.github/workflows/build.yml`: every push runs the tests, builds a signed APK, and publishes it as release `build-<run number>`.
 

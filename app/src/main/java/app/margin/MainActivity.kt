@@ -19,6 +19,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import app.margin.data.Library
+import app.margin.pdf.PdfStore
 import app.margin.ui.EaseOutSmooth
 import app.margin.ui.LibraryScreen
 import app.margin.ui.MarginTheme
@@ -39,6 +40,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         Updater.check(this)
+        PdfStore.keepMissingCopies(this)
     }
 
     override fun onNewIntent(intent: Intent) {

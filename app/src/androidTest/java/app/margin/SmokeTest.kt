@@ -15,9 +15,11 @@ import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.pinch
 import androidx.compose.ui.test.swipeUp
@@ -36,8 +38,9 @@ import java.nio.ByteOrder
 
 /**
  * Walks through the app on a real (emulated) tablet: empty library, opening a PDF,
- * scrolling, pinch-zoom, the pages panel and back. Saves a screenshot at each step
- * (CI uploads them) and fails if a step doesn't show what it should.
+ * scrolling, pinch-zoom, the pages panel and back; then reading Margin's copy after the
+ * original is deleted, splitting, deleting from Margin, and a new notebook. Saves a
+ * screenshot at each step (CI uploads them) and fails if a step doesn't show what it should.
  */
 @RunWith(AndroidJUnit4::class)
 class SmokeTest {
@@ -217,6 +220,88 @@ class SmokeTest {
             val backup = File(ctx.filesDir, "originals/${Library.idFor(Uri.fromFile(pdf))}.pdf")
             check(backup.exists()) { "No backup of the original was kept" }
             check(!String(backup.readBytes(), Charsets.ISO_8859_1).contains("Margin")) { "The backup isn't the untouched original" }
+
+            // ---- Margin keeps its own copy: the PDF still opens after the original is deleted ----
+            val id = Library.idFor(Uri.fromFile(pdf))
+            check(File(ctx.filesDir, "docs/$id.pdf").exists()) { "Margin didn't keep its own copy of the PDF" }
+            check(pdf.delete()) { "Couldn't delete the original PDF for the test" }
+            compose.onNodeWithText("Continue").performClick()
+            waitForText("Can't find the original file · showing Margin's copy")
+            waitForSubstring(" of 6")
+            compose.waitUntil(timeoutMillis = 10_000) {
+                compose.onAllNodesWithText("Margin's copy", substring = true).fetchSemanticsNodes().isEmpty()
+            }
+            shotWhenPageShowsText("12-original-deleted")
+
+            // ---- Split it into PDFs of 2 pages ----
+            compose.onNodeWithContentDescription("Extract or split pages").performClick()
+            settle(800)
+            compose.onNodeWithText("Split").performClick()
+            compose.onNodeWithTag("pagesPerPdf").performTextReplacement("2")
+            settle(600)
+            shot("13-split-dialog")
+            compose.onNodeWithText("Make 3 PDFs").performClick()
+            waitForText("Made 3 PDFs · they're in your library")
+            compose.onNodeWithContentDescription("Back to library").performClick()
+            waitForText("Sample Notes (pages 5–6)")
+            settle(1500)
+            shot("14-library-with-parts")
+            for (part in listOf("1–2", "3–4")) {
+                check(compose.onAllNodesWithText("Sample Notes (pages $part)").fetchSemanticsNodes().isNotEmpty()) { "Part $part is missing" }
+            }
+
+            // A part is a real PDF with just its pages.
+            compose.onNodeWithText("Sample Notes (pages 3–4)").performClick()
+            waitForSubstring("Page 1 of 2")
+            shotWhenPageShowsText("15-part-opened")
+            compose.onNodeWithContentDescription("Back to library").performClick()
+            waitForText("CONTINUE WHERE YOU LEFT OFF")
+            settle(1500)
+
+            // ---- Delete a part from Margin, for good ----
+            val doomed = Library.get(ctx).docs.value.first { it.title == "Sample Notes (pages 5–6)" }
+            compose.onNodeWithText("Sample Notes (pages 5–6)").performTouchInput { longClick() }
+            settle(800)
+            compose.onNodeWithText("Delete from Margin…").performClick()
+            settle(600)
+            shot("16-delete-dialog")
+            compose.onNodeWithText("Delete").performClick()
+            compose.waitUntil(timeoutMillis = 10_000) {
+                compose.onAllNodesWithText("Sample Notes (pages 5–6)").fetchSemanticsNodes().isEmpty()
+            }
+            settle(800)
+            check(Library.get(ctx).get(doomed.id) == null) { "The deleted PDF is still in the library" }
+            check(!File(ctx.filesDir, "docs/${doomed.id}.pdf").exists()) { "Deleting from Margin left its copy behind" }
+
+            // ---- New notes: make a notebook on grid paper and write in it ----
+            compose.onNodeWithText("New notes").performClick()
+            settle(800)
+            compose.onNodeWithTag("notesName").performTextReplacement("Test notebook")
+            compose.onNodeWithText("Grid").performClick()
+            settle(400)
+            shot("17-new-notes-dialog")
+            compose.onNodeWithText("Create").performClick()
+            waitForSubstring("Page 1 of 1")
+            settle(2000)
+            val blank = blueInk()
+            penStroke(zigzag())
+            settle(1200)
+            waitForBlueInk { it > blank + 250 }
+            shot("18-notebook-with-ink")
+            compose.onNodeWithContentDescription("Back to library").performClick()
+            waitForText("CONTINUE WHERE YOU LEFT OFF")
+            val notes = Library.get(ctx).docs.value.first { it.title == "Test notebook" }
+            val notesFile = File(ctx.filesDir, "docs/${notes.id}.pdf")
+            val until = SystemClock.uptimeMillis() + 15_000
+            var notesText = ""
+            while (SystemClock.uptimeMillis() < until) {
+                notesText = if (notesFile.exists()) String(notesFile.readBytes(), Charsets.ISO_8859_1) else ""
+                if (notesText.contains("Margin") && notesText.contains("/Ink")) break
+                Thread.sleep(500)
+            }
+            check(notesText.contains("Margin") && notesText.contains("/Ink")) { "The notebook's ink wasn't saved into it" }
+            settle(1000)
+            shot("19-library-final")
         }
     }
 
@@ -425,6 +510,12 @@ class SmokeTest {
     private fun waitForText(text: String) {
         compose.waitUntil(timeoutMillis = 20_000) {
             compose.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty()
+        }
+    }
+
+    private fun waitForSubstring(text: String) {
+        compose.waitUntil(timeoutMillis = 20_000) {
+            compose.onAllNodesWithText(text, substring = true).fetchSemanticsNodes().isNotEmpty()
         }
     }
 

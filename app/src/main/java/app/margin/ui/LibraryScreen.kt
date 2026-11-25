@@ -70,6 +70,7 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -86,8 +87,8 @@ import app.margin.BuildConfig
 import app.margin.data.Doc
 import app.margin.data.Library
 import app.margin.update.Updater
-import app.margin.pdf.PdfSaver
-import android.net.Uri
+import app.margin.pdf.PdfStore
+import app.margin.pdf.pdfFileName
 import android.widget.Toast
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.launch
@@ -128,11 +129,27 @@ fun LibraryScreen(onOpen: (String) -> Unit) {
     var starredOnly by rememberSaveable { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var restoreTarget by remember { mutableStateOf<Doc?>(null) }
+    var deleteTarget by remember { mutableStateOf<Doc?>(null) }
+    var toolsTarget by remember { mutableStateOf<Doc?>(null) }
+    // Saveable: the app may be stopped while the Files picker is open.
+    var exportTargetId by rememberSaveable { mutableStateOf<String?>(null) }
+    var showNewNotes by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { to ->
+        val d = exportTargetId?.let(library::get)
+        exportTargetId = null
+        if (to != null && d != null) {
+            scope.launch {
+                val ok = PdfStore.export(ctx, d.id, to)
+                Toast.makeText(ctx, if (ok) "Saved a copy of \"${d.title}\"" else "Couldn't save a copy", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
     val shown = remember(docs, query, starredOnly) {
         docs.filter { (!starredOnly || it.starred) && (query.isBlank() || it.title.contains(query.trim(), ignoreCase = true)) }
     }
-    val last = docs.firstOrNull()
+    // The PDF you read last (PDFs Margin just made, never opened, don't count).
+    val last = remember(docs) { docs.filter { it.lastOpened > 0 }.maxByOrNull { it.lastOpened } ?: docs.firstOrNull() }
     val bottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     val full: (androidx.compose.foundation.lazy.grid.LazyGridItemSpanScope.() -> GridItemSpan) = { GridItemSpan(maxLineSpan) }
 
@@ -151,12 +168,15 @@ fun LibraryScreen(onOpen: (String) -> Unit) {
             item(key = "update", span = full) { UpdateBanner(u, Modifier.animateItem()) }
         }
         if (last == null) {
-            item(key = "empty", span = full) { EmptyState(openPicker) }
+            item(key = "empty", span = full) { EmptyState(openPicker, onNewNotes = { showNewNotes = true }) }
         } else {
             item(key = "hero", span = full) {
                 Row(Modifier.fillMaxWidth().height(200.dp), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
                     ContinueCard(last, rememberThumb(library, last.id), { onOpen(last.id) }, Modifier.weight(1f))
-                    OpenCard(openPicker, Modifier.width(300.dp).fillMaxHeight())
+                    Column(Modifier.width(300.dp).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                        ActionCard(MIcons.Plus, "Open a PDF", "From Files, Drive or OneDrive", openPicker, Modifier.weight(1f))
+                        ActionCard(MIcons.NewPage, "New notes", "A blank notebook to write in", { showNewNotes = true }, Modifier.weight(1f))
+                    }
                 }
             }
             item(key = "recent", span = full) {
@@ -168,8 +188,13 @@ fun LibraryScreen(onOpen: (String) -> Unit) {
                     thumb = rememberThumb(library, d.id),
                     onOpen = { onOpen(d.id) },
                     onToggleStar = { library.update(d.id) { it.copy(starred = !it.starred) } },
-                    onRemove = { library.remove(d.id) },
-                    onRestore = if (PdfSaver.hasBackup(ctx, d.id)) ({ restoreTarget = d }) else null,
+                    onPageTools = if (d.pageCount > 1) ({ toolsTarget = d }) else null,
+                    onExport = {
+                        exportTargetId = d.id
+                        runCatching { exporter.launch(pdfFileName(d.title)) }
+                    },
+                    onRestore = if (PdfStore.hasBackup(ctx, d.id)) ({ restoreTarget = d }) else null,
+                    onDelete = { deleteTarget = d },
                     modifier = Modifier.animateItem(),
                 )
             }
@@ -185,6 +210,15 @@ fun LibraryScreen(onOpen: (String) -> Unit) {
     }
 
     if (showSettings) SettingsDialog(onDismiss = { showSettings = false })
+    if (showNewNotes) {
+        NewNotesDialog(
+            onCreated = { d ->
+                showNewNotes = false
+                onOpen(d.id)
+            },
+            onDismiss = { showNewNotes = false },
+        )
+    }
     restoreTarget?.let { d ->
         AlertDialog(
             onDismissRequest = { restoreTarget = null },
@@ -195,13 +229,49 @@ fun LibraryScreen(onOpen: (String) -> Unit) {
                 TextButton(onClick = {
                     restoreTarget = null
                     scope.launch {
-                        val ok = PdfSaver.restore(ctx, d.id, Uri.parse(d.uri))
-                        if (ok) java.io.File(ctx.filesDir, "ink/${d.id}.json").delete()
+                        val ok = PdfStore.restore(ctx, d.id)
                         Toast.makeText(ctx, if (ok) "Original restored" else "Couldn't restore the original", Toast.LENGTH_SHORT).show()
                     }
                 }) { Text("Restore", color = c.danger) }
             },
             dismissButton = { TextButton(onClick = { restoreTarget = null }) { Text("Cancel") } },
+        )
+    }
+    deleteTarget?.let { d ->
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            containerColor = c.surface,
+            title = { Text("Delete \"${d.title}\" from Margin?", color = c.text, fontWeight = FontWeight.SemiBold) },
+            text = {
+                Text(
+                    if (d.uri != null) {
+                        "Margin's copy of this PDF and your ink in it are deleted for good. The original file isn't touched."
+                    } else {
+                        "This PDF was made in Margin and only exists here, so it's gone for good. " +
+                            "To keep it, use Save a copy to Files first."
+                    },
+                    color = c.textMuted,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    deleteTarget = null
+                    scope.launch { PdfStore.delete(ctx, d) }
+                }) { Text("Delete", color = c.danger) }
+            },
+            dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("Cancel") } },
+        )
+    }
+    toolsTarget?.let { d ->
+        PageToolsDialog(
+            doc = d,
+            pageCount = d.pageCount,
+            source = { PdfStore.prepare(ctx, d.id).file },
+            onMade = { made ->
+                toolsTarget = null
+                Toast.makeText(ctx, if (made.size == 1) "Made a new PDF" else "Made ${made.size} PDFs", Toast.LENGTH_SHORT).show()
+            },
+            onDismiss = { toolsTarget = null },
         )
     }
 }
@@ -288,7 +358,7 @@ private fun ContinueCard(doc: Doc, thumb: ImageBitmap?, onOpen: () -> Unit, modi
             Text("CONTINUE WHERE YOU LEFT OFF", color = c.textMuted, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 1.3.sp)
             Text(doc.title, color = c.text, fontSize = 22.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             val pages = if (doc.pageCount > 0) "Page ${doc.lastPage + 1} of ${doc.pageCount} · " else ""
-            Text("${pages}opened ${relativeTime(doc.lastOpened)}", color = c.textMuted, fontSize = 13.sp)
+            Text("${pages}${if (doc.lastOpened > 0) "opened " else ""}${openedText(doc)}", color = c.textMuted, fontSize = 13.sp)
             val progress = if (doc.pageCount > 0) (doc.lastPage + 1f) / doc.pageCount else 0f
             Box(Modifier.padding(top = 6.dp).width(320.dp).height(6.dp).background(c.surfaceAlt, CircleShape)) {
                 Box(Modifier.fillMaxWidth(progress).height(6.dp).background(c.accent, CircleShape))
@@ -307,12 +377,14 @@ private fun ContinueCard(doc: Doc, thumb: ImageBitmap?, onOpen: () -> Unit, modi
     }
 }
 
+/** A dashed card with an icon, a title and a line of explanation ("Open a PDF", "New notes"). */
 @Composable
-private fun OpenCard(onClick: () -> Unit, modifier: Modifier) {
+private fun ActionCard(icon: ImageVector, title: String, subtitle: String, onClick: () -> Unit, modifier: Modifier) {
     val c = Margin.colors
     val dash = c.textMuted.copy(alpha = 0.4f)
-    Column(
+    Row(
         modifier
+            .fillMaxWidth()
             .clip(RoundedCornerShape(20.dp))
             .drawBehind {
                 drawRoundRect(
@@ -321,20 +393,23 @@ private fun OpenCard(onClick: () -> Unit, modifier: Modifier) {
                     cornerRadius = CornerRadius(20.dp.toPx()),
                 )
             }
-            .clickable(onClickLabel = "Open a PDF", onClick = onClick),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically),
+            .clickable(onClickLabel = title, onClick = onClick)
+            .padding(horizontal = 20.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        Box(Modifier.size(52.dp).background(c.accentSoft, CircleShape), contentAlignment = Alignment.Center) {
-            Icon(MIcons.Plus, contentDescription = null, tint = c.accent)
+        Box(Modifier.size(44.dp).background(c.accentSoft, CircleShape), contentAlignment = Alignment.Center) {
+            Icon(icon, contentDescription = null, tint = c.accent)
         }
-        Text("Open a PDF", color = c.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-        Text("From Files, Drive or OneDrive", color = c.textMuted, fontSize = 13.sp)
+        Column {
+            Text(title, color = c.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Text(subtitle, color = c.textMuted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
     }
 }
 
 @Composable
-private fun EmptyState(onOpen: () -> Unit) {
+private fun EmptyState(onOpen: () -> Unit, onNewNotes: () -> Unit) {
     val c = Margin.colors
     Column(
         Modifier.fillMaxWidth().padding(top = 40.dp).background(c.surface, RoundedCornerShape(20.dp)).padding(48.dp),
@@ -346,14 +421,17 @@ private fun EmptyState(onOpen: () -> Unit) {
         }
         Text("Open your first PDF", color = c.text, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
         Text(
-            "Pick a PDF from Files, Drive or OneDrive. Margin keeps a link to it; the file stays where it is.",
+            "Pick a PDF from Files, Drive or OneDrive, or start a notebook to write in. " +
+                "Margin keeps its own copy of every PDF, so it stays here even if the original is deleted.",
             color = c.textMuted, fontSize = 14.sp,
         )
-        Button(
-            onClick = onOpen,
-            modifier = Modifier.padding(top = 8.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.onAccent),
-        ) { Text("Open a PDF", fontWeight = FontWeight.SemiBold) }
+        Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Button(
+                onClick = onOpen,
+                colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.onAccent),
+            ) { Text("Open a PDF", fontWeight = FontWeight.SemiBold) }
+            OutlinedButton(onClick = onNewNotes) { Text("New notes", fontWeight = FontWeight.SemiBold) }
+        }
     }
 }
 
@@ -390,8 +468,10 @@ private fun DocCard(
     thumb: ImageBitmap?,
     onOpen: () -> Unit,
     onToggleStar: () -> Unit,
-    onRemove: () -> Unit,
+    onPageTools: (() -> Unit)?,
+    onExport: () -> Unit,
     onRestore: (() -> Unit)?,
+    onDelete: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val c = Margin.colors
@@ -426,6 +506,18 @@ private fun DocCard(
                     leadingIcon = { Icon(MIcons.Star, contentDescription = null) },
                     onClick = { menu = false; onToggleStar() },
                 )
+                if (onPageTools != null) {
+                    DropdownMenuItem(
+                        text = { Text("Extract or split pages…") },
+                        leadingIcon = { Icon(MIcons.Scissors, contentDescription = null) },
+                        onClick = { menu = false; onPageTools() },
+                    )
+                }
+                DropdownMenuItem(
+                    text = { Text("Save a copy to Files…") },
+                    leadingIcon = { Icon(MIcons.SaveFile, contentDescription = null) },
+                    onClick = { menu = false; onExport() },
+                )
                 if (onRestore != null) {
                     DropdownMenuItem(
                         text = { Text("Restore original PDF") },
@@ -434,19 +526,22 @@ private fun DocCard(
                     )
                 }
                 DropdownMenuItem(
-                    text = { Text("Remove from library") },
-                    leadingIcon = { Icon(MIcons.Trash, contentDescription = null) },
-                    onClick = { menu = false; onRemove() },
+                    text = { Text("Delete from Margin…", color = c.danger) },
+                    leadingIcon = { Icon(MIcons.Trash, contentDescription = null, tint = c.danger) },
+                    onClick = { menu = false; onDelete() },
                 )
             }
         }
         Column(Modifier.padding(horizontal = 2.dp)) {
             Text(doc.title, color = c.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, lineHeight = 19.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            val meta = if (doc.pageCount > 0) "${doc.pageCount} pages · ${relativeTime(doc.lastOpened)}" else relativeTime(doc.lastOpened)
+            val meta = if (doc.pageCount > 0) "${doc.pageCount} pages · ${openedText(doc)}" else openedText(doc)
             Text(meta, color = c.textMuted, fontSize = 12.sp)
         }
     }
 }
+
+/** "2 hours ago", or "new" for a PDF Margin made that you haven't opened yet. */
+private fun openedText(doc: Doc): String = if (doc.lastOpened > 0) relativeTime(doc.lastOpened) else "new"
 
 /** A page-shaped cover image, or blank text lines while there's no thumbnail yet. */
 @Composable

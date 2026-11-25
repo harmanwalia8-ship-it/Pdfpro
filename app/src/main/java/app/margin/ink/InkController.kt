@@ -318,7 +318,7 @@ class InkController(ctx: Context, docId: String) {
     }
 
     // ---- Autosave ----
-    private val file = File(ctx.filesDir, "ink/$docId.json")
+    private val file = app.margin.data.Library.get(ctx).inkFile(docId)
     private var saveJob: Job? = null
 
     private fun scheduleSave() {
