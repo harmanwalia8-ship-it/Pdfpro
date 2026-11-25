@@ -3,6 +3,7 @@ package app.margin.ui
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.net.Uri
 import android.util.LruCache
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
@@ -102,6 +103,13 @@ import app.margin.pdf.PdfDoc
 import app.margin.pdf.PdfStore
 import app.margin.pdf.PageTemplate
 import app.margin.pdf.pdfFileName
+import app.margin.pdf.PageMoves
+import app.margin.ink.ImageItem
+import app.margin.ink.TextItem
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import java.io.File
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
@@ -132,6 +140,8 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
     val c = Margin.colors
     val library = remember { Library.get(ctx) }
     val entry = remember(docId) { library.get(docId) }
+    val docs by library.docs.collectAsStateWithLifecycle()
+    val live = docs.firstOrNull { it.id == docId } ?: entry
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current.density
 
@@ -158,7 +168,9 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
             val kept = PdfStore.prepare(ctx, docId)
             if (kept.originalMissing) hint = "Can't find the original file · showing Margin's copy"
             val doc = PdfDoc.open(kept.file)
-            ink.importSaved(doc.savedInk) // e.g. after reinstalling: the ink is still in the PDF
+            // e.g. after reinstalling, or in a PDF made from another one: the notes are still in the PDF
+            ink.importSaved(doc.savedInk, doc.savedItems) { item, file -> doc.renderSavedImage(item, file) }
+            ink.lineFinder = { page, x0, y, x1 -> doc.textLines(page, x0, y, x1) }
             pdf = doc
         } catch (e: CancellationException) {
             throw e
@@ -172,7 +184,7 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
             error = "Couldn't open this PDF."
         }
     }
-    // ---- Saving your ink into the PDF file itself (Margin's copy; your original file is never changed) ----
+    // ---- Saving your notes into the PDF file itself (Margin's copy; your original file is never changed) ----
     var saveState by remember(docId) { mutableStateOf<PdfStore.Result?>(null) }
     var saving by remember(docId) { mutableStateOf(false) }
     suspend fun saveIntoFile() {
@@ -180,7 +192,7 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
         if (!ink.pdfDirty || saving) return
         val v = ink.version
         saving = true
-        val r = PdfStore.save(ctx, docId, doc, ink.forPdf())
+        val r = PdfStore.save(ctx, docId, doc, ink.forPdf(), ink.itemsForPdf())
         saving = false
         saveState = r
         if (r == PdfStore.Result.Saved) ink.markWrittenToPdf(v)
@@ -207,28 +219,38 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
         onDispose {
             ink.flush()
             appScope.launch {
-                if (doc != null && ink.pdfDirty) PdfStore.save(ctx, docId, doc, ink.forPdf())
+                if (doc != null && ink.pdfDirty) PdfStore.save(ctx, docId, doc, ink.forPdf(), ink.itemsForPdf())
                 doc?.close()
             }
         }
     }
 
-    // Adding or deleting pages rebuilds the page layout; [start] carries the view over to it.
+    // Changing pages rebuilds the page layout; [start] carries the view over to it.
     var pagesVersion by remember(docId) { mutableIntStateOf(0) }
     val start = remember(docId) { StartView(entry?.lastPage ?: 0, entry?.zoom ?: 1f, entry?.zoomLocked ?: false) }
     val state = remember(pdf, pagesVersion) {
         pdf?.let { ViewerState(it.pageSizes, density, start.page, start.zoom, start.locked) }
+    }
+    val search = remember(pdf, pagesVersion) {
+        val doc = pdf
+        val st = state
+        if (doc == null || st == null) null else SearchState(doc, scope) { hit ->
+            val b = hit.boxes.firstOrNull()
+            scope.launch { st.animateToSpot(hit.page, b?.left ?: 0f, b?.top ?: 0f) }
+        }
+    }
+
+    suspend fun refreshCover(doc: PdfDoc) {
+        val bm = doc.thumbnail(0, 360) ?: return
+        withContext(Dispatchers.IO) { library.thumbFile(docId).outputStream().use { bm.compress(Bitmap.CompressFormat.PNG, 100, it) } }
+        forgetThumb(docId)
     }
 
     // First open: remember the page count and save a cover thumbnail for the library.
     LaunchedEffect(pdf) {
         val doc = pdf ?: return@LaunchedEffect
         library.update(docId) { it.copy(pageCount = doc.pageCount) }
-        val thumb = library.thumbFile(docId)
-        if (!thumb.exists()) {
-            val bm = doc.thumbnail(0, 360) ?: return@LaunchedEffect
-            withContext(Dispatchers.IO) { thumb.outputStream().use { bm.compress(Bitmap.CompressFormat.PNG, 100, it) } }
-        }
+        if (!library.thumbFile(docId).exists()) refreshCover(doc)
     }
     // Remember where you were, how far you'd zoomed, and whether the zoom was locked.
     LaunchedEffect(state) {
@@ -238,12 +260,32 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
             library.update(docId) { it.copy(lastPage = p, zoom = z, zoomLocked = l) }
         }
     }
+    // A notebook grows as you write: notes on its last page add a fresh page after it, with the same paper.
+    LaunchedEffect(ink.version, pdf, state) {
+        val doc = pdf ?: return@LaunchedEffect
+        val s = state ?: return@LaunchedEffect
+        val paper = live?.paper?.let { p -> PageTemplate.entries.firstOrNull { it.name == p } } ?: return@LaunchedEffect
+        val last = doc.pageCount - 1
+        if (!ink.hasNotes(last)) return@LaunchedEffect
+        delay(1200) // after a pause in writing, so the page appears without interrupting you
+        if (doc.insertPage(last, paper)) {
+            s.updatePages(doc.pageSizes)
+            ink.markDirty()
+            library.update(docId) { it.copy(pageCount = doc.pageCount) }
+        }
+    }
 
     var showPages by rememberSaveable(docId) { mutableStateOf(false) }
+    var sideTab by rememberSaveable(docId) { mutableStateOf(SideTab.Pages) }
     var showPageTools by remember(docId) { mutableStateOf(false) }
     var panel by remember { mutableStateOf<TrayPanel?>(null) }
-    /** Adds or deletes pages in the PDF itself, moves the ink with its pages, then saves. */
-    fun editPages(goTo: Int, edit: suspend (PdfDoc) -> Boolean, moveInk: () -> Unit) {
+    var textEdit by remember { mutableStateOf<TextEdit?>(null) }
+
+    /**
+     * Changes pages in the PDF itself, moves your notes and bookmarks with their pages
+     * ([marks] maps an old page number to its new one, or null if it's gone), then saves.
+     */
+    fun editPages(goTo: Int, edit: suspend (PdfDoc) -> Boolean, moveNotes: () -> Unit, marks: (Int) -> Int?) {
         val doc = pdf ?: return
         val s = state ?: return
         scope.launch {
@@ -251,33 +293,70 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
                 hint = "This file's pages can't be changed"
                 return@launch
             }
-            moveInk()
+            moveNotes()
             start.page = goTo.coerceIn(0, doc.pageCount - 1)
             start.zoom = s.zoom
             start.locked = s.zoomLocked
             pagesVersion++
-            library.update(docId) { it.copy(pageCount = doc.pageCount) }
+            library.update(docId) { it.copy(pageCount = doc.pageCount, bookmarks = PageMoves.remapBookmarks(it.bookmarks, marks)) }
             saveIntoFile()
+            refreshCover(doc)
+        }
+    }
+
+    // Pictures: picked with Android's photo picker (Margin reads only the one you pick).
+    val pickPicture = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        val s = state
+        if (uri == null || s == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            val pic = importPicture(ctx, uri, ink)
+            if (pic == null) {
+                hint = "Couldn't add that picture"
+                return@launch
+            }
+            // In the middle of the part of the page you're looking at.
+            val page = s.currentPage
+            val pw = s.pageSizes[page].width
+            val ph = s.pageSizes[page].height
+            val top = ((s.scrollY - s.pageTop(page)) / s.scale).coerceIn(0f, ph)
+            val bottom = ((s.scrollY + s.viewport.height - s.pageTop(page)) / s.scale).coerceIn(top, ph)
+            val boxH = ((bottom - top) * 0.6f).coerceAtLeast(40f)
+            ink.addImage(page, pic.name, pic.width, pic.height, pw * 0.2f, top + (bottom - top - boxH) / 2, pw * 0.6f, boxH)
+            hint = "Drag to move it · drag its corner to resize"
         }
     }
 
     BackHandler(enabled = panel != null) { panel = null }
     BackHandler(enabled = showPages && panel == null) { showPages = false }
+    BackHandler(enabled = search?.open == true && !showPages && panel == null) { search?.close() }
 
     Column(Modifier.fillMaxSize().background(c.background)) {
+        val s0 = state
+        val currentPage by remember(s0) { derivedStateOf { s0?.currentPage ?: 0 } }
+        val bookmarked = live?.bookmarks?.contains(currentPage) == true
         ReaderTopBar(
-            title = entry?.title.orEmpty(),
+            title = live?.title.orEmpty(),
             state = state,
+            search = search,
             status = when {
                 saving -> "Saving…"
-                ink.pdfDirty && saveState == PdfStore.Result.ReadOnly -> "Can't save into this file; ink kept in Margin"
+                ink.pdfDirty && saveState == PdfStore.Result.ReadOnly -> "Can't save into this file; notes kept in Margin"
                 ink.pdfDirty && saveState == PdfStore.Result.Failed -> "Not saved yet"
                 ink.pdfDirty -> null
                 saveState == PdfStore.Result.Saved -> "Saved"
                 else -> null
             },
             pagesOpen = showPages,
+            bookmarked = bookmarked,
             onBack = onBack,
+            onSearch = { search?.open = true },
+            onBookmark = {
+                val p = currentPage
+                library.update(docId) { d ->
+                    d.copy(bookmarks = if (p in d.bookmarks) d.bookmarks - p else (d.bookmarks + p).sorted())
+                }
+                hint = if (bookmarked) "Bookmark removed" else "Bookmarked page ${p + 1}"
+            },
             onPages = { showPages = !showPages },
             onPageTools = { showPageTools = true },
             onToggleLock = {
@@ -287,21 +366,21 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
                 }
             },
             onShare = {
-                entry?.let { e ->
+                live?.let { e ->
                     scope.launch {
-                        saveIntoFile() // share the file with your latest ink in it
+                        saveIntoFile() // share the file with your latest notes in it
                         share(ctx, PdfStore.copyFile(ctx, docId), e.title)
                     }
                 }
             },
         )
         val toolsFor = pdf
-        if (showPageTools && entry != null && toolsFor != null) {
+        if (showPageTools && live != null && toolsFor != null) {
             PageToolsDialog(
-                doc = entry,
+                doc = live,
                 pageCount = toolsFor.pageCount,
                 source = {
-                    saveIntoFile() // the new PDFs get your latest ink and page changes
+                    saveIntoFile() // the new PDFs get your latest notes and page changes
                     PdfStore.copyFile(ctx, docId)
                 },
                 onMade = { made ->
@@ -311,26 +390,51 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
                 onDismiss = { showPageTools = false },
             )
         }
+        textEdit?.let { t ->
+            TextBoxDialog(
+                existing = t.existing,
+                onDone = { text, size, color ->
+                    textEdit = null
+                    val existing = t.existing
+                    if (existing != null) {
+                        ink.updateText(t.page, existing.id, text, size, color)
+                    } else {
+                        val pw = state?.pageSizes?.getOrNull(t.page)?.width ?: 595f
+                        val x = t.x.coerceAtMost(pw - 98f).coerceAtLeast(6f)
+                        ink.addText(t.page, x, t.y - size * 0.6f, (pw - x - 18f).coerceIn(80f, 280f), text, size, color)
+                    }
+                },
+                onDelete = t.existing?.let { e -> { textEdit = null; ink.updateText(t.page, e.id, "", e.size, e.color) } },
+                onDismiss = { textEdit = null },
+            )
+        }
         Box(Modifier.fillMaxWidth().weight(1f).background(c.desk)) {
             val doc = pdf
             val s = state
             // The pages slide right to make room for the panel (a pure move, no re-render).
-            val shift by animateDpAsState(if (showPages) 116.dp else 0.dp, tween(300, easing = EaseOutSmooth), label = "shift")
+            val shift by animateDpAsState(if (showPages) SidePanelWidth / 2 else 0.dp, tween(300, easing = EaseOutSmooth), label = "shift")
             when {
                 error != null -> Message(error.orEmpty(), onBack, Modifier.align(Alignment.Center))
                 doc == null || s == null -> Loading(Modifier.align(Alignment.Center))
                 else -> {
                     Box(Modifier.fillMaxSize().graphicsLayer { translationX = shift.toPx() }) {
                         key(s) {
-                            DocumentViewer(doc, s, ink)
+                            DocumentViewer(doc, s, ink, search)
                             var router by remember { mutableStateOf<InputRouter?>(null) }
-                            InkSurface(s, ink, onRouter = { router = it }, onDownAnywhere = {
-                                if (panel != null) {
-                                    panel = null
-                                    true
-                                } else false
-                            })
-                            router?.let { SelectionBar(it, ink) }
+                            InkSurface(
+                                s, ink,
+                                onRouter = { router = it },
+                                onDownAnywhere = {
+                                    if (panel != null) {
+                                        panel = null
+                                        true
+                                    } else false
+                                },
+                                onTextTap = { page, x, y, existing -> textEdit = TextEdit(page, x, y, existing) },
+                            )
+                            router?.let { r ->
+                                SelectionBar(r, ink, onEditText = { page, item -> textEdit = TextEdit(page, item.x, item.y, item) })
+                            }
                         }
                     }
                     PagePill(s, Modifier.align(Alignment.TopCenter))
@@ -341,6 +445,9 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
                         onClearPage = {
                             ink.clearPage(s.currentPage)
                             panel = null
+                        },
+                        onInsertImage = {
+                            runCatching { pickPicture.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
                         },
                         modifier = Modifier.align(Alignment.BottomCenter)
                             .windowInsetsPadding(WindowInsets.navigationBars).padding(bottom = 16.dp),
@@ -364,22 +471,65 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
                 exit = slideOutHorizontally(tween(250, easing = EaseOutSmooth)) { -it } + fadeOut(tween(200)),
             ) {
                 if (doc != null && s != null) {
-                    PagesPanel(
-                        doc, s, pagesVersion,
-                        onPick = { i -> scope.launch { s.animateToPage(i) } },
+                    SidePanel(
+                        doc, s, ink, pagesVersion,
+                        bookmarks = live?.bookmarks.orEmpty(),
+                        tab = sideTab,
+                        onTab = { sideTab = it },
                         onClose = { showPages = false },
-                        onAdd = { after, template ->
-                            editPages(goTo = after + 1, edit = { it.insertPage(after, template) }) { ink.onPageInserted(after + 1) }
-                        },
-                        onDelete = { i ->
-                            val goTo = if (i >= doc.pageCount - 1) i - 1 else i
-                            editPages(goTo = goTo, edit = { it.deletePage(i) }) { ink.onPageDeleted(i) }
-                        },
+                        actions = PageActions(
+                            onPick = { i -> scope.launch { s.animateToPage(i) } },
+                            onAdd = { after, template ->
+                                editPages(after + 1, { it.insertPage(after, template) }, { ink.onPageInserted(after + 1) }) {
+                                    PageMoves.afterInsert(it, after + 1)
+                                }
+                            },
+                            onDelete = { i ->
+                                val goTo = if (i >= doc.pageCount - 1) i - 1 else i
+                                editPages(goTo, { it.deletePage(i) }, { ink.onPageDeleted(i) }) { PageMoves.afterDelete(it, i) }
+                            },
+                            onDuplicate = { i ->
+                                editPages(i + 1, { it.duplicatePage(i) }, { ink.onPageDuplicated(i) }) { PageMoves.afterInsert(it, i + 1) }
+                            },
+                            onTurn = { i ->
+                                val oldHeight = doc.pageSizes[i].height
+                                editPages(i, { it.turnPage(i) }, { ink.onPageTurned(i, oldHeight) }) { it }
+                            },
+                            onMove = { from, to ->
+                                editPages(to, { it.movePage(from, to) }, { ink.onPageMoved(from, to) }) { PageMoves.afterMove(it, from, to) }
+                            },
+                            onRemoveBookmark = { p -> library.update(docId) { d -> d.copy(bookmarks = d.bookmarks - p) } },
+                        ),
                     )
                 }
             }
         }
     }
+}
+
+/** The text tool touched [page] at ([x], [y]): edit [existing], or add a new text box there. */
+private class TextEdit(val page: Int, val x: Float, val y: Float, val existing: TextItem?)
+
+/** A picture saved into the PDF's images folder, and its size in pixels. */
+private class Picture(val name: String, val width: Int, val height: Int)
+
+/**
+ * Copies the picture at [uri] into this PDF's images folder (shrunk to at most 2048 px a side),
+ * so it stays even if the photo is deleted.
+ */
+private suspend fun importPicture(ctx: Context, uri: Uri, ink: InkController): Picture? = withContext(Dispatchers.IO) {
+    runCatching {
+        val name = "img-${System.currentTimeMillis()}"
+        val raw = ink.imageFile("$name.src")
+        ctx.contentResolver.openInputStream(uri)?.use { input -> raw.outputStream().use { input.copyTo(it) } } ?: return@runCatching null
+        val bm = InkController.decode(raw, 2048)
+        raw.delete()
+        bm ?: return@runCatching null
+        val png = bm.hasAlpha()
+        val file = ink.imageFile(if (png) "$name.png" else "$name.jpg")
+        file.outputStream().use { bm.compress(if (png) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG, 90, it) }
+        Picture(file.name, bm.width, bm.height)
+    }.getOrNull()
 }
 
 /**
@@ -389,11 +539,18 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
  */
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
-private fun InkSurface(state: ViewerState, ink: InkController, onRouter: (InputRouter) -> Unit, onDownAnywhere: () -> Boolean) {
+private fun InkSurface(
+    state: ViewerState,
+    ink: InkController,
+    onRouter: (InputRouter) -> Unit,
+    onDownAnywhere: () -> Boolean,
+    onTextTap: (page: Int, x: Float, y: Float, existing: TextItem?) -> Unit,
+) {
     val scope = rememberCoroutineScope()
     val host = LocalView.current
     val density = LocalDensity.current.density
     val downAnywhere by rememberUpdatedState(onDownAnywhere)
+    val textTap by rememberUpdatedState(onTextTap)
     var router by remember { mutableStateOf<InputRouter?>(null) }
     Box(
         Modifier.fillMaxSize()
@@ -420,7 +577,11 @@ private fun InkSurface(state: ViewerState, ink: InkController, onRouter: (InputR
                         rendererFactory = { ink.renderer }
                     }
                     eagerInit()
-                    val r = InputRouter(state, ink, this, host, scope, density) { downAnywhere() }
+                    val r = InputRouter(
+                        state, ink, this, host, scope, density,
+                        onDownAnywhere = { downAnywhere() },
+                        onTextTap = { page, x, y, existing -> textTap(page, x, y, existing) },
+                    )
                     router = r
                     onRouter(r)
                 }
@@ -465,16 +626,21 @@ private fun InkSurface(state: ViewerState, ink: InkController, onRouter: (InputR
     }
 }
 
-/** Actions for the lasso selection (recolor, duplicate, delete), just above the selection. */
+/**
+ * Actions for what's selected, just above it: lassoed ink (recolor, duplicate, delete), a text box
+ * (edit, recolor, duplicate, delete) or a picture (duplicate, delete).
+ */
 @Composable
-private fun SelectionBar(router: InputRouter, ink: InkController) {
+private fun SelectionBar(router: InputRouter, ink: InkController, onEditText: (page: Int, TextItem) -> Unit) {
     val c = Margin.colors
     var colors by remember { mutableStateOf(false) }
-    LaunchedEffect(ink.selection) { colors = false }
+    LaunchedEffect(ink.selection, ink.selectedItem) { colors = false }
     val last = remember { floatArrayOf(0f, 0f) }
+    ink.version // follow edits to the selected item
+    val item = ink.selectedItemValue()
     Box(Modifier.fillMaxSize()) {
         androidx.compose.animation.AnimatedVisibility(
-            visible = ink.selection != null && !router.dragging,
+            visible = (ink.selection != null || item != null) && !router.dragging,
             enter = fadeIn(tween(120)) + scaleIn(tween(180, easing = EaseOutSmooth), initialScale = 0.92f),
             exit = fadeOut(tween(100)),
             modifier = Modifier.offset {
@@ -502,7 +668,9 @@ private fun SelectionBar(router: InputRouter, ink: InkController) {
                         )
                     }
                 } else {
-                    BarChip("Color") { colors = true }
+                    val page = ink.selectedItem?.page
+                    if (item is TextItem && page != null) BarChip("Edit") { onEditText(page, item) }
+                    if (item !is ImageItem) BarChip("Color") { colors = true }
                     BarChip("Duplicate") { ink.duplicateSelection() }
                     BarChip("Delete", c.danger) { ink.deleteSelection() }
                 }
@@ -523,9 +691,13 @@ private fun BarChip(text: String, color: Color = Margin.colors.text, onClick: ()
 private fun ReaderTopBar(
     title: String,
     state: ViewerState?,
+    search: SearchState?,
     status: String?,
     pagesOpen: Boolean,
+    bookmarked: Boolean,
     onBack: () -> Unit,
+    onSearch: () -> Unit,
+    onBookmark: () -> Unit,
     onPages: () -> Unit,
     onPageTools: () -> Unit,
     onToggleLock: () -> Unit,
@@ -535,6 +707,11 @@ private fun ReaderTopBar(
     val page by remember(state) { derivedStateOf { state?.currentPage ?: 0 } }
     val locked = state?.zoomLocked == true
     Column(Modifier.background(c.background).windowInsetsPadding(WindowInsets.statusBars)) {
+        if (search != null && search.open) {
+            SearchBar(search, currentPage = { state?.currentPage ?: 0 }, Modifier.height(56.dp).padding(horizontal = 8.dp))
+            HorizontalDivider(thickness = 1.dp, color = c.line)
+            return@Column
+        }
         Row(
             Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -548,6 +725,12 @@ private fun ReaderTopBar(
                     color = c.textMuted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
             }
+            IconBtn(MIcons.Search, "Search in this PDF", onSearch, enabled = search != null)
+            IconBtn(
+                if (bookmarked) MIcons.BookmarkFilled else MIcons.Bookmark,
+                if (bookmarked) "Remove bookmark" else "Bookmark this page",
+                onBookmark, active = bookmarked, enabled = state != null,
+            )
             IconBtn(
                 if (locked) MIcons.Lock else MIcons.Unlock,
                 if (locked) "Unlock zoom" else "Lock zoom",
@@ -585,162 +768,6 @@ private fun PagePill(state: ViewerState, modifier: Modifier = Modifier) {
             modifier = Modifier.background(Color(0xE61C1B1A), CircleShape).padding(horizontal = 14.dp, vertical = 7.dp),
         )
     }
-}
-
-@Composable
-private fun PagesPanel(
-    doc: PdfDoc,
-    state: ViewerState,
-    version: Int,
-    onPick: (Int) -> Unit,
-    onClose: () -> Unit,
-    onAdd: (after: Int, PageTemplate) -> Unit,
-    onDelete: (Int) -> Unit,
-) {
-    var addAfter by remember { mutableStateOf<Int?>(null) }
-    var deleteAt by remember { mutableStateOf<Int?>(null) }
-    val c = Margin.colors
-    val current by remember(state) { derivedStateOf { state.currentPage } }
-    val list = rememberLazyListState(initialFirstVisibleItemIndex = (current - 1).coerceAtLeast(0))
-    val thumbs = remember(doc, version) {
-        object : LruCache<Int, ImageBitmap>(48 * 1024 * 1024) {
-            override fun sizeOf(key: Int, value: ImageBitmap) = value.width * value.height * 4
-        }
-    }
-    LaunchedEffect(current) {
-        if (list.layoutInfo.visibleItemsInfo.none { it.index == current }) {
-            list.animateScrollToItem((current - 1).coerceAtLeast(0))
-        }
-    }
-    Column(Modifier.width(232.dp).fillMaxHeight().shadow(12.dp).background(c.background)) {
-        Row(Modifier.fillMaxWidth().height(52.dp).padding(start = 18.dp, end = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("Pages", color = c.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            Text(" · ${doc.pageCount}", color = c.textMuted, fontSize = 15.sp)
-            Spacer(Modifier.weight(1f))
-            IconBtn(MIcons.Plus, "Add page", { addAfter = current })
-            IconBtn(MIcons.Close, "Close pages", onClose)
-        }
-        LazyColumn(
-            state = list,
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(top = 6.dp, bottom = 32.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            items(doc.pageCount, key = { "$version-$it" }) { i ->
-                PageThumb(
-                    doc, i, thumbs, selected = i == current, onClick = { onPick(i) },
-                    onAddAfter = { addAfter = i },
-                    onDelete = if (doc.pageCount > 1) ({ deleteAt = i }) else null,
-                )
-            }
-        }
-    }
-    addAfter?.let { after ->
-        AddPageDialog(after, onAdd = { t ->
-            addAfter = null
-            onAdd(after, t)
-        }, onDismiss = { addAfter = null })
-    }
-    deleteAt?.let { i ->
-        AlertDialog(
-            onDismissRequest = { deleteAt = null },
-            containerColor = c.surface,
-            title = { Text("Delete page ${i + 1}?", color = c.text, fontWeight = FontWeight.SemiBold) },
-            text = { Text("The page and any ink on it are removed from the PDF. You can still restore the original file from the library.", color = c.textMuted) },
-            confirmButton = {
-                TextButton(onClick = {
-                    deleteAt = null
-                    onDelete(i)
-                }) { Text("Delete", color = c.danger) }
-            },
-            dismissButton = { TextButton(onClick = { deleteAt = null }) { Text("Cancel") } },
-        )
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun PageThumb(
-    doc: PdfDoc,
-    index: Int,
-    cache: LruCache<Int, ImageBitmap>,
-    selected: Boolean,
-    onClick: () -> Unit,
-    onAddAfter: () -> Unit,
-    onDelete: (() -> Unit)?,
-) {
-    val c = Margin.colors
-    var menu by remember { mutableStateOf(false) }
-    val size = doc.pageSizes[index]
-    var image by remember(index) { mutableStateOf(cache.get(index)) }
-    LaunchedEffect(index) {
-        if (image == null) {
-            doc.thumbnail(index, 240)?.asImageBitmap()?.let {
-                cache.put(index, it)
-                image = it
-            }
-        }
-    }
-    val ring by animateFloatAsState(if (selected) 1f else 0f, tween(200), label = "ring")
-    val shape = RoundedCornerShape(4.dp)
-    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Box(
-            Modifier
-                .width(120.dp)
-                .aspectRatio(size.width / size.height)
-                .shadow(2.dp, shape)
-                .clip(shape)
-                .background(Color.White)
-                .border(2.5.dp, c.accent.copy(alpha = ring), shape)
-                .combinedClickable(
-                    onClickLabel = "Go to page ${index + 1}",
-                    onLongClickLabel = "Page options",
-                    onClick = onClick,
-                    onLongClick = { menu = true },
-                )
-                .semantics { contentDescription = "Page ${index + 1}" },
-        ) {
-            image?.let { Image(it, contentDescription = null, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.FillBounds) }
-            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                DropdownMenuItem(
-                    text = { Text("Add page after") },
-                    leadingIcon = { Icon(MIcons.Plus, contentDescription = null) },
-                    onClick = { menu = false; onAddAfter() },
-                )
-                if (onDelete != null) {
-                    DropdownMenuItem(
-                        text = { Text("Delete page", color = c.danger) },
-                        leadingIcon = { Icon(MIcons.Trash, contentDescription = null, tint = c.danger) },
-                        onClick = { menu = false; onDelete() },
-                    )
-                }
-            }
-        }
-        Text(
-            "${index + 1}",
-            fontSize = 12.sp,
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-            color = if (selected) c.accent else c.textMuted,
-        )
-    }
-}
-
-/** Picks the look of a new page: blank, lined, grid or dotted. */
-@Composable
-private fun AddPageDialog(after: Int, onAdd: (PageTemplate) -> Unit, onDismiss: () -> Unit) {
-    val c = Margin.colors
-    var pick by remember { mutableStateOf(PageTemplate.Lined) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = c.surface,
-        title = { Text("Add page after page ${after + 1}", color = c.text, fontWeight = FontWeight.SemiBold) },
-        text = {
-            PaperPicker(pick, onPick = { pick = it })
-        },
-        confirmButton = { TextButton(onClick = { onAdd(pick) }) { Text("Add page") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-    )
 }
 
 /** The view to restore after the page layout is rebuilt. */

@@ -85,11 +85,17 @@ object PdfStore {
      * Writes [ink] (and any page changes) into Margin's copy. The original file is never written to.
      * Before the first save, the untouched PDF is kept as a backup.
      */
-    suspend fun save(ctx: Context, docId: String, pdf: PdfDoc, ink: Map<Int, List<InkForPdf>>): Result = lock.withLock {
+    suspend fun save(
+        ctx: Context,
+        docId: String,
+        pdf: PdfDoc,
+        ink: Map<Int, List<InkForPdf>>,
+        items: Map<Int, List<ItemForPdf>>,
+    ): Result = lock.withLock {
         val copy = copyFile(ctx, docId)
         val part = File(copy.parentFile, "$docId.saving")
         try {
-            if (!pdf.saveWithInk(ink, part)) return@withLock Result.ReadOnly
+            if (!pdf.saveWithInk(ink, items, part)) return@withLock Result.ReadOnly
             withContext(Dispatchers.IO) {
                 val library = Library.get(ctx)
                 val doc = library.get(docId) ?: return@withContext Result.Failed // deleted from Margin meanwhile
@@ -152,6 +158,7 @@ object PdfStore {
             copyFile(ctx, doc.id).delete()
             backupFile(ctx, doc.id).delete()
             library.inkFile(doc.id).delete()
+            library.imagesDir(doc.id).deleteRecursively()
         }
         doc.uri?.let(Uri::parse)?.let { uri ->
             // Margin no longer needs access to the original.

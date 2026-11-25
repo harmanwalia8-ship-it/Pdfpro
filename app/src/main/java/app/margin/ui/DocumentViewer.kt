@@ -30,9 +30,14 @@ import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import app.margin.ink.ImageItem
 import app.margin.ink.InkController
 import app.margin.ink.InkStroke
+import app.margin.ink.PageItem
 import app.margin.ink.PenType
+import app.margin.ink.TextItem
 import app.margin.pdf.PdfDoc
 import kotlinx.coroutines.delay
 import kotlin.math.ceil
@@ -50,7 +55,7 @@ import kotlin.math.roundToInt
  * straight onto the screen-sized viewer, and only the part that's on screen.
  */
 @Composable
-fun DocumentViewer(doc: PdfDoc, state: ViewerState, ink: InkController?, modifier: Modifier = Modifier) {
+fun DocumentViewer(doc: PdfDoc, state: ViewerState, ink: InkController?, search: SearchState? = null, modifier: Modifier = Modifier) {
     val cache = remember(doc) { PageCache() }
     DisposableEffect(cache) { onDispose { cache.clear() } }
     val density = LocalDensity.current.density
@@ -70,10 +75,17 @@ fun DocumentViewer(doc: PdfDoc, state: ViewerState, ink: InkController?, modifie
     ) {
         val range by remember(state) { derivedStateOf { state.visibleRange() } }
         for (i in range) {
-            key(i) { PageView(doc, state, ink, cache, i, pagePaint) }
+            key(i) { PageView(doc, state, ink, search, cache, i, pagePaint) }
         }
     }
 }
+
+/** Search matches, and the one you're on. */
+private val MATCH = androidx.compose.ui.graphics.Color(0x55FFC400)
+private val CURRENT_MATCH = androidx.compose.ui.graphics.Color(0x88FF7A00)
+
+/** Stands in for a picture while it loads. */
+private val placeholderPaint = Paint().apply { color = 0x1F000000 }
 
 /** Largest side of any page image, well inside GPU texture limits (8192 on Adreno 642L). */
 private const val MAX_PAGE_IMAGE_PX = 4096f
@@ -94,7 +106,15 @@ private class PageCache {
 }
 
 @Composable
-private fun PageView(doc: PdfDoc, state: ViewerState, ink: InkController?, cache: PageCache, index: Int, pagePaint: Paint) {
+private fun PageView(
+    doc: PdfDoc,
+    state: ViewerState,
+    ink: InkController?,
+    search: SearchState?,
+    cache: PageCache,
+    index: Int,
+    pagePaint: Paint,
+) {
     val pageSize = state.pageSizes[index]
 
     // Full-page image: as wide as the page appears on screen (after zooming stops), capped at the screen width.
@@ -112,6 +132,7 @@ private fun PageView(doc: PdfDoc, state: ViewerState, ink: InkController?, cache
     val imagePaint = remember(index) { Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG) }
     val inkMatrix = remember(index) { Matrix() }
     val selMatrix = remember(index) { Matrix() }
+    val itemRect = remember(index) { RectF() }
 
     LaunchedEffect(index, targetWidth) {
         val have = base
@@ -177,11 +198,25 @@ private fun PageView(doc: PdfDoc, state: ViewerState, ink: InkController?, cache
                     )
                 }
 
-                // Ink, stored in page points: scale and move it onto the page, clipped to the paper.
+                // Search matches: marked on the paper, under your notes.
+                if (search != null && search.hits.isNotEmpty()) {
+                    val now = search.hits.getOrNull(search.current)
+                    for (hit in search.hits) {
+                        if (hit.page != index) continue
+                        val color = if (hit === now) CURRENT_MATCH else MATCH
+                        for (b in hit.boxes) {
+                            drawRect(color, Offset(left + b.left * s, top + b.top * s), Size(b.width * s, b.height * s))
+                        }
+                    }
+                }
+
+                // Your notes, stored in page points: scale and move them onto the page, clipped to the paper.
                 if (ink != null) {
-                    ink.version // redraw when the ink changes
+                    ink.version // redraw when the notes change
+                    ink.redraw // ...or a picture finished loading
                     val strokes = ink.strokes(index)
-                    if (strokes.isNotEmpty()) {
+                    val items = ink.items(index)
+                    if (strokes.isNotEmpty() || items.isNotEmpty()) {
                         inkMatrix.setScale(s, s)
                         inkMatrix.postTranslate(left, top)
                         drawIntoCanvas {
@@ -200,6 +235,7 @@ private fun PageView(doc: PdfDoc, state: ViewerState, ink: InkController?, cache
                                 selMatrix.postScale(t.scale, t.scale)
                                 selMatrix.postTranslate(sel.bounds.left + t.dx, sel.bounds.top + t.dy)
                             }
+                            val movingItem = ink.selectedItem?.takeIf { it.page == index && !t.isIdentity }?.id
                             fun drawStroke(st: InkStroke) {
                                 if (sel != null && moving && st.id in sel.ids) {
                                     nc.save()
@@ -210,8 +246,24 @@ private fun PageView(doc: PdfDoc, state: ViewerState, ink: InkController?, cache
                                     ink.renderer.draw(nc, ink.inkStroke(st), inkMatrix)
                                 }
                             }
-                            // Highlighter first, so pen ink always sits on top of it.
+                            fun live(item: PageItem): PageItem = if (item.id == movingItem) item.transformed(t) else item
+                            // Pictures sit on the paper; highlighter over them; then text; pen ink on top.
+                            for (item in items) {
+                                if (item !is ImageItem) continue
+                                val shown = live(item)
+                                itemRect.set(shown.x, shown.y, shown.x + shown.w, shown.y + shown.h)
+                                val bm = ink.bitmap(item)
+                                if (bm != null) nc.drawBitmap(bm, null, itemRect, imagePaint.apply { alpha = 255 })
+                                else nc.drawRect(itemRect, placeholderPaint)
+                            }
                             for (st in strokes) if (st.style.type == PenType.Highlighter) drawStroke(st)
+                            for (item in items) {
+                                val shown = live(item) as? TextItem ?: continue
+                                nc.save()
+                                nc.translate(shown.x, shown.y)
+                                ink.textLayout(shown).draw(nc)
+                                nc.restore()
+                            }
                             for (st in strokes) if (st.style.type != PenType.Highlighter) drawStroke(st)
                             nc.restore()
                         }

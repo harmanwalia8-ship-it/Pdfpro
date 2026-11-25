@@ -1,7 +1,17 @@
 package app.margin.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
@@ -39,6 +49,7 @@ fun NewNotesDialog(onCreated: (Doc) -> Unit, onDismiss: () -> Unit) {
     val scope = rememberCoroutineScope()
     var name by rememberSaveable { mutableStateOf("Notes " + DateFormat.getDateInstance(DateFormat.MEDIUM).format(Date())) }
     var paper by rememberSaveable { mutableStateOf(PageTemplate.Lined) }
+    var landscape by rememberSaveable { mutableStateOf(false) }
     var working by remember { mutableStateOf(false) }
     var failed by remember { mutableStateOf(false) }
     AlertDialog(
@@ -56,10 +67,15 @@ fun NewNotesDialog(onCreated: (Doc) -> Unit, onDismiss: () -> Unit) {
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, imeAction = ImeAction.Done),
                     modifier = Modifier.fillMaxWidth().testTag("notesName"),
                 )
+                Text("Pages", color = c.textMuted, fontSize = 13.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Choice("Portrait", !landscape) { landscape = false }
+                    Choice("Landscape", landscape) { landscape = true }
+                }
                 Text("Paper", color = c.textMuted, fontSize = 13.sp)
-                PaperPicker(paper, onPick = { paper = it })
+                PaperPicker(paper, onPick = { paper = it }, landscape = landscape)
                 Text(
-                    "Starts with one A4 page. Add pages from the Pages panel as you write.",
+                    "A4 pages. When you write on the last page, a new one is added after it.",
                     color = c.textMuted, fontSize = 13.sp,
                 )
                 if (failed) Text("Couldn't make the notebook.", color = c.danger, fontSize = 14.sp)
@@ -73,7 +89,7 @@ fun NewNotesDialog(onCreated: (Doc) -> Unit, onDismiss: () -> Unit) {
                     failed = false
                     scope.launch {
                         try {
-                            onCreated(PageTools.createNotes(ctx, name, paper))
+                            onCreated(PageTools.createNotes(ctx, name, paper, landscape))
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Exception) {
@@ -86,4 +102,16 @@ fun NewNotesDialog(onCreated: (Doc) -> Unit, onDismiss: () -> Unit) {
         },
         dismissButton = { TextButton(onClick = onDismiss, enabled = !working) { Text("Cancel") } },
     )
+}
+
+/** A small two-way choice chip (Portrait / Landscape). */
+@Composable
+internal fun Choice(text: String, selected: Boolean, onClick: () -> Unit) {
+    val c = Margin.colors
+    Box(
+        Modifier.height(36.dp).clip(CircleShape).background(if (selected) c.text else c.surfaceAlt)
+            .selectable(selected = selected, role = Role.RadioButton, onClick = onClick)
+            .padding(horizontal = 16.dp),
+        contentAlignment = Alignment.Center,
+    ) { Text(text, color = if (selected) c.background else c.textMuted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold) }
 }

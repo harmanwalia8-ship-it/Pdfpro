@@ -49,6 +49,12 @@ data class Doc(
      * there may be none, and a later save mustn't pass an inked copy off as the original).
      */
     val edited: Boolean = false,
+    /** The library folder it's in, or null for none. */
+    val folder: String? = null,
+    /** Pages you bookmarked (0-based, sorted). */
+    val bookmarks: List<Int> = emptyList(),
+    /** For notebooks made in Margin: their paper (a PageTemplate name), used for pages added as you write. */
+    val paper: String? = null,
 )
 
 /**
@@ -69,6 +75,18 @@ class Library private constructor(private val ctx: Context) {
 
     /** Your ink for this PDF, as Margin keeps it (it also goes into the PDF when saved). */
     fun inkFile(id: String): File = File(ctx.filesDir, "ink/$id.json")
+
+    /** Images you put on this PDF's pages. */
+    fun imagesDir(id: String): File = File(ctx.filesDir, "images/$id")
+
+    /** All folder names in use, sorted. */
+    fun folders(): List<String> = _docs.value.mapNotNull { it.folder }.distinct().sortedWith(String.CASE_INSENSITIVE_ORDER)
+
+    /** Renames folder [from] to [to] on every PDF in it ([to] = null takes them out of the folder). */
+    fun renameFolder(from: String, to: String?) {
+        _docs.update { list -> list.map { if (it.folder == from) it.copy(folder = to) else it } }
+        persist()
+    }
 
     /** Adds (or refreshes) a PDF picked by the user and returns its entry. */
     fun add(uri: Uri): Doc {
@@ -133,6 +151,9 @@ class Library private constructor(private val ctx: Context) {
                 added = o.optLong("added"),
                 copyAhead = o.optBoolean("copyAhead"),
                 edited = o.optBoolean("edited"),
+                folder = if (o.isNull("folder")) null else o.getString("folder"),
+                bookmarks = o.optJSONArray("bookmarks")?.let { a -> List(a.length()) { a.getInt(it) } }.orEmpty(),
+                paper = if (o.isNull("paper")) null else o.getString("paper"),
             )
         }.sortedByDescending { maxOf(it.lastOpened, it.added) }
     }.getOrDefault(emptyList())
@@ -149,7 +170,9 @@ class Library private constructor(private val ctx: Context) {
                             .put("pageCount", d.pageCount).put("lastPage", d.lastPage)
                             .put("lastOpened", d.lastOpened).put("starred", d.starred)
                             .put("zoom", d.zoom.toDouble()).put("zoomLocked", d.zoomLocked)
-                            .put("added", d.added).put("copyAhead", d.copyAhead).put("edited", d.edited),
+                            .put("added", d.added).put("copyAhead", d.copyAhead).put("edited", d.edited)
+                            .put("folder", d.folder).put("paper", d.paper)
+                            .put("bookmarks", JSONArray(d.bookmarks)),
                     )
                 }
                 val tmp = File(file.parentFile, "library.json.tmp")

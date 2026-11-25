@@ -27,6 +27,8 @@ import app.margin.ink.Bounds
 import app.margin.ink.EraserMode
 import app.margin.ink.InkController
 import app.margin.ink.PenStyle
+import app.margin.ink.PenType
+import app.margin.ink.TextItem
 import app.margin.ink.SelTransform
 import app.margin.ink.ShapeSnap
 import app.margin.ink.Tool
@@ -41,7 +43,9 @@ import kotlin.math.min
  * All touches on the document come here as raw MotionEvents:
  *  - the S Pen writes, erases (eraser tool, or while its side button is held) or lassoes;
  *    holding it still at the end of a stroke snaps the stroke into a clean line or shape;
- *  - a selection can be moved (drag inside it) or resized (drag its corner) with pen or finger;
+ *  - a selection (lassoed ink, or a text box or picture you tapped) can be moved (drag inside it)
+ *    or resized (drag its corner) with pen or finger;
+ *  - with the text tool, a tap adds a text box (or opens the one you tapped);
  *  - fingers scroll and zoom: one finger scrolls, two fingers pinch;
  *    with the zoom locked, only two fingers scroll and nothing zooms;
  *  - palm rejection: fingers are ignored while the pen touches or hovers (and shortly after),
@@ -56,6 +60,8 @@ class InputRouter(
     private val density: Float,
     /** Called on every new touch; returns true when it used the touch (e.g. to close a panel). */
     private val onDownAnywhere: () -> Boolean,
+    /** The text tool touched page [page] at ([x], [y]) in page points: on [existing], or on empty paper. */
+    private val onTextTap: (page: Int, x: Float, y: Float, existing: TextItem?) -> Unit,
 ) {
     /** Where the pen is (hovering or erasing), for the eraser and pen cursors. Null when away. */
     var penAt by mutableStateOf<Offset?>(null)
@@ -81,14 +87,27 @@ class InputRouter(
     init {
         strokes.addFinishedStrokesListener(object : InProgressStrokesFinishedListener {
             override fun onStrokesFinished(strokes: Map<InProgressStrokeId, Stroke>) {
+                val done = HashSet<InProgressStrokeId>()
                 strokes.forEach { (id, stroke) ->
-                    val p = pending.remove(id) ?: return@forEach
-                    val pts = toPagePoints(stroke, p.viewToPage)
-                    log("finished page=${p.page} points=${pts.size / 4}")
-                    if (pts.size >= 4) ink.addFinished(p.page, p.style, pts)
+                    val p = pending.remove(id)
+                    val pts = p?.let { toPagePoints(stroke, it.viewToPage) }
+                    log("finished page=${p?.page} points=${(pts?.size ?: 0) / 4}")
+                    if (p == null || pts == null || pts.size < 4) {
+                        done += id
+                    } else if (p.style.type == PenType.Highlighter && ink.snapHighlighter) {
+                        // Snapping onto the printed lines looks at the page's text first; the live
+                        // stroke stays on screen until its snapped (or unchanged) version replaces it.
+                        scope.launch {
+                            ink.finishHighlight(p.page, p.style, pts)
+                            this@InputRouter.strokes.postOnAnimation { this@InputRouter.strokes.removeFinishedStrokes(setOf(id)) }
+                        }
+                    } else {
+                        ink.addFinished(p.page, p.style, pts)
+                        done += id
+                    }
                 }
                 // Our page layer draws them from the next frame on; then the live layer can let go.
-                this@InputRouter.strokes.postOnAnimation { this@InputRouter.strokes.removeFinishedStrokes(strokes.keys) }
+                if (done.isNotEmpty()) this@InputRouter.strokes.postOnAnimation { this@InputRouter.strokes.removeFinishedStrokes(done) }
             }
         })
     }
@@ -156,7 +175,7 @@ class InputRouter(
     }
 
     // ---------------- Pen ----------------
-    private enum class Mode { None, Write, Erase, Lasso, Drag }
+    private enum class Mode { None, Write, Erase, Lasso, Drag, Text }
 
     private var mode = Mode.None
     private var penPointer = -1
@@ -179,6 +198,7 @@ class InputRouter(
         mode = when {
             eraserButton || ink.tool == Tool.Eraser -> Mode.Erase
             ink.tool == Tool.Lasso -> Mode.Lasso
+            ink.tool == Tool.Text -> Mode.Text
             else -> Mode.Write
         }
         // While writing, the ink itself shows where the pen is; the cursor is for hovering and erasing.
@@ -191,6 +211,7 @@ class InputRouter(
                 eraseTo(at)
             }
             Mode.Lasso -> lassoDown(at)
+            Mode.Text -> textDown = at
             else -> writeDown(ev, at)
         }
     }
@@ -244,7 +265,7 @@ class InputRouter(
                 lassoVersion++
             }
             Mode.Drag -> updateDrag(at)
-            Mode.None -> Unit
+            Mode.Text, Mode.None -> Unit
         }
     }
 
@@ -263,6 +284,11 @@ class InputRouter(
             }
             Mode.Lasso -> finishLasso()
             Mode.Drag -> endDrag()
+            Mode.Text -> {
+                val i = ev.findPointerIndex(penPointer)
+                val at = if (i >= 0) Offset(ev.getX(i), ev.getY(i)) else textDown
+                if ((at - textDown).getDistance() < slop) textTap(textDown)
+            }
             Mode.None -> Unit
         }
         strokeId = null
@@ -292,7 +318,7 @@ class InputRouter(
                 drag = Drag.None
                 dragging = false
             }
-            Mode.None -> Unit
+            Mode.Text, Mode.None -> Unit
         }
         strokeId = null
         penPointer = -1
@@ -343,6 +369,32 @@ class InputRouter(
         val x = state.scrollX + at.x
         val inside = y >= top && y <= top + state.pageHeight(page) && x >= left && x <= left + state.pageWidth(page)
         return if (inside) page else null
+    }
+
+    /** A point on screen as (page, x, y in page points), or null off the pages. */
+    private fun onPage(at: Offset): Triple<Int, Float, Float>? {
+        val page = pageAt(at) ?: return null
+        val s = state.scale
+        return Triple(page, (at.x - (state.pageLeft(page) - state.scrollX)) / s, (at.y - (state.pageTop(page) - state.scrollY)) / s)
+    }
+
+    // ---------------- Text boxes and pictures ----------------
+    private var textDown = Offset.Zero
+
+    /** The text tool touched the page: edit the text box there, or start a new one. */
+    private fun textTap(at: Offset) {
+        val (page, x, y) = onPage(at) ?: return
+        val existing = ink.itemAt(page, x, y) as? TextItem
+        if (existing != null) ink.selectItem(page, existing.id) else ink.clearSelection()
+        onTextTap(page, x, y, existing)
+    }
+
+    /** Selects the text box or picture under [at]; false if there's none. */
+    private fun selectItemAt(at: Offset): Boolean {
+        val (page, x, y) = onPage(at) ?: return false
+        val item = ink.itemAt(page, x, y) ?: return false
+        ink.selectItem(page, item.id)
+        return true
     }
 
     /** Screen (this view) to page points, for strokes stored in page coordinates. */
@@ -408,12 +460,12 @@ class InputRouter(
 
     /** The selection's box on screen (with the live move / resize applied), or null. */
     fun selectionOnScreen(): Bounds? {
-        val sel = ink.selection ?: return null
+        val (page, b) = ink.selectionBox() ?: return null
+        if (page >= state.pageCount) return null
         val t = ink.selTransform
         val s = state.scale
-        val ox = state.pageLeft(sel.page) - state.scrollX
-        val oy = state.pageTop(sel.page) - state.scrollY
-        val b = sel.bounds
+        val ox = state.pageLeft(page) - state.scrollX
+        val oy = state.pageTop(page) - state.scrollY
         val pad = 6f * density
         return Bounds(
             ox + (b.left + t.dx) * s - pad,
@@ -438,14 +490,20 @@ class InputRouter(
         }
         ink.clearSelection()
         lassoPage = pageAt(at) ?: -1
+        lassoStart = at
         lasso.clear()
         if (lassoPage >= 0) lasso += at
         lassoVersion++
     }
 
+    private var lassoStart = Offset.Zero
+
     private fun finishLasso() {
         val page = lassoPage
-        if (page >= 0 && lasso.size >= 3) {
+        val tap = lasso.all { (it - lassoStart).getDistance() < slop }
+        if (page >= 0 && tap) {
+            selectItemAt(lassoStart) // a tap with the lasso picks a text box or picture
+        } else if (page >= 0 && lasso.size >= 3) {
             val poly = FloatArray(lasso.size * 2)
             lasso.forEachIndexed { k, o ->
                 poly[2 * k] = o.x
@@ -467,15 +525,15 @@ class InputRouter(
     }
 
     private fun updateDrag(at: Offset) {
-        val sel = ink.selection ?: return
+        val (_, box) = ink.selectionBox() ?: return
         val s = state.scale
         val dx = (at.x - dragStart.x) / s
         val dy = (at.y - dragStart.y) / s
         when (drag) {
             Drag.Move -> ink.previewSelection(SelTransform(dx, dy, 1f))
             Drag.Resize -> {
-                val w = sel.bounds.width.coerceAtLeast(1f)
-                val h = sel.bounds.height.coerceAtLeast(1f)
+                val w = box.width.coerceAtLeast(1f)
+                val h = box.height.coerceAtLeast(1f)
                 // One scale for both sides, keeping the dragged corner under the pen (along the diagonal).
                 val k = (((w + dx) * w + (h + dy) * h) / (w * w + h * h)).coerceIn(0.2f, 8f)
                 ink.previewSelection(SelTransform(0f, 0f, k))
@@ -581,7 +639,12 @@ class InputRouter(
     }
 
     private fun onTap(at: Offset, now: Long) {
-        if (ink.selection != null) {
+        if (ink.tool == Tool.Text) {
+            textTap(at)
+            return
+        }
+        if (selectItemAt(at)) return // a tap on a text box or picture selects it
+        if (ink.selection != null || ink.selectedItem != null) {
             ink.clearSelection() // a tap outside the selection lets it go
             return
         }

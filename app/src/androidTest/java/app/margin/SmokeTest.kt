@@ -10,7 +10,12 @@ import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.WindowManager
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.test.click
 import androidx.compose.ui.test.doubleClick
+import androidx.compose.ui.test.filterToOne
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.isDialog
+import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
@@ -289,6 +294,8 @@ class SmokeTest {
             penStroke(zigzag())
             settle(1200)
             waitForBlueInk { it > blank + 250 }
+            // A notebook grows: writing on its last page adds the next one (after a pause in writing).
+            waitForSubstring(" of 2")
             shot("18-notebook-with-ink")
             compose.onNodeWithContentDescription("Back to library").performClick()
             waitForText("CONTINUE WHERE YOU LEFT OFF")
@@ -302,8 +309,101 @@ class SmokeTest {
                 Thread.sleep(500)
             }
             check(notesText.contains("Margin") && notesText.contains("/Ink")) { "The notebook's ink wasn't saved into it" }
+            check(Library.get(ctx).get(notes.id)?.pageCount == 2) { "The notebook didn't grow a page" }
             settle(1000)
             shot("19-library-final")
+
+            // ---- Search, bookmarks, contents, duplicate page and a text box, in the PDF ----
+            compose.onNodeWithText("Sample Notes").performClick()
+            waitForSubstring(" of 6")
+            settle(1500)
+            compose.onNodeWithContentDescription("Search in this PDF").performClick()
+            settle(800)
+            compose.onNodeWithContentDescription("Search in this PDF").performTextInput("Chapter 3")
+            waitForText("1 of 1")
+            settle(1500)
+            shot("20-search")
+            compose.onNodeWithContentDescription("Close search").performClick()
+            compose.waitUntil(timeoutMillis = 10_000) { currentPage() == 3 }
+
+            compose.onNodeWithContentDescription("Bookmark this page").performClick()
+            waitForText("Bookmarked page 3")
+            check(Library.get(ctx).get(id)?.bookmarks == listOf(2)) { "The bookmark wasn't kept" }
+            compose.onNodeWithContentDescription("Show pages").performClick()
+            settle(1500)
+            compose.onNodeWithText("Bookmarks").performClick()
+            settle(800)
+            check(compose.onAllNodesWithText("Page 3").fetchSemanticsNodes().isNotEmpty()) { "The bookmark isn't listed" }
+            shot("21-bookmarks")
+            compose.onNodeWithText("Contents").performClick()
+            waitForText("This PDF has no table of contents.")
+            compose.onNodeWithText("Pages").performClick()
+            settle(1200)
+
+            compose.onNodeWithContentDescription("Page 1").performTouchInput { longClick() }
+            settle(800)
+            compose.onNodeWithText("Duplicate page").performClick()
+            compose.waitUntil(timeoutMillis = 20_000) { compose.onAllNodesWithText(" of 7", substring = true).fetchSemanticsNodes().isNotEmpty() }
+            settle(1500)
+            check(Library.get(ctx).get(id)?.bookmarks == listOf(3)) { "The bookmark didn't move with its page" }
+            compose.onNodeWithContentDescription("Close pages").performClick()
+            settle(800)
+
+            compose.onNodeWithContentDescription("Text").performClick()
+            settle(500)
+            compose.onRoot().performTouchInput { click(center) }
+            waitForText("Add text")
+            compose.onNodeWithTag("textBox").performTextInput("Hello from Margin")
+            compose.onNodeWithText("Add").performClick()
+            settle(1500)
+            val inkJson = File(ctx.filesDir, "ink/$id.json")
+            val textBy = SystemClock.uptimeMillis() + 8_000
+            while (SystemClock.uptimeMillis() < textBy && !(inkJson.exists() && inkJson.readText().contains("Hello from Margin"))) Thread.sleep(300)
+            check(inkJson.readText().contains("Hello from Margin")) { "The text box wasn't kept" }
+            shot("22-text-box")
+            compose.onNodeWithContentDescription("Back to library").performClick()
+            waitForText("CONTINUE WHERE YOU LEFT OFF")
+            val savedBy = SystemClock.uptimeMillis() + 15_000
+            while (SystemClock.uptimeMillis() < savedBy && !String(copy.readBytes(), Charsets.ISO_8859_1).contains("FreeText")) Thread.sleep(500)
+            check(String(copy.readBytes(), Charsets.ISO_8859_1).contains("FreeText")) { "The text box wasn't saved into the PDF" }
+            settle(1000)
+
+            // ---- Library: a folder, merging two PDFs, renaming ----
+            compose.onNodeWithText("Test notebook").performTouchInput { longClick() }
+            settle(800)
+            compose.onNodeWithText("Move to folder…").performClick()
+            settle(600)
+            compose.onNodeWithTag("newFolder").performTextInput("School")
+            compose.onNodeWithText("Move").performClick()
+            waitForText("School")
+            compose.onNodeWithText("School").performClick()
+            settle(800)
+            check(compose.onAllNodesWithText("Sample Notes (pages 1–2)").fetchSemanticsNodes().isEmpty()) { "The folder shows PDFs that aren't in it" }
+            check(compose.onAllNodesWithText("Test notebook").fetchSemanticsNodes().isNotEmpty()) { "The folder doesn't show its PDF" }
+            compose.onNodeWithText("All").performClick()
+            settle(800)
+
+            compose.onNodeWithText("Sample Notes (pages 1–2)").performTouchInput { longClick() }
+            settle(800)
+            compose.onNodeWithText("Merge with other PDFs…").performClick()
+            settle(800)
+            compose.onAllNodesWithText("Sample Notes (pages 3–4)").filterToOne(hasAnyAncestor(isDialog())).performClick()
+            settle(400)
+            shot("23-merge-dialog")
+            compose.onNodeWithText("Merge 2 PDFs").performClick()
+            waitForText("Sample Notes (pages 1–2) + 1 more")
+            val merged = Library.get(ctx).docs.value.first { it.title == "Sample Notes (pages 1–2) + 1 more" }
+            check(merged.pageCount == 4) { "The merged PDF has ${merged.pageCount} pages, not 4" }
+            settle(800)
+            compose.onNodeWithText("Sample Notes (pages 1–2) + 1 more").performTouchInput { longClick() }
+            settle(800)
+            compose.onNodeWithText("Rename…").performClick()
+            settle(600)
+            compose.onNodeWithTag("renameField").performTextReplacement("Merged notes")
+            compose.onNodeWithText("Rename").performClick()
+            waitForText("Merged notes")
+            settle(1000)
+            shot("24-library-folders-merge")
         }
     }
 

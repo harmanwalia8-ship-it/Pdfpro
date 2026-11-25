@@ -21,12 +21,16 @@ import kotlin.math.min
  */
 @Stable
 class ViewerState(
-    val pageSizes: List<PageSize>,
+    sizes: List<PageSize>,
     private val density: Float,
     private val initialPage: Int,
     initialZoom: Float = 1f,
     initialLocked: Boolean = false,
 ) {
+    /** Page sizes (PDF points). Pages added at the end (a notebook growing) update in place. */
+    var pageSizes by mutableStateOf(sizes)
+        private set
+
     var viewport by mutableStateOf(IntSize.Zero)
         private set
     var zoom by mutableFloatStateOf(initialZoom.coerceIn(0.5f, 6f))
@@ -53,11 +57,23 @@ class ViewerState(
     private val padBottom = 128f * density // keeps the last page clear of floating tools
     private val sideMargin = 24f * density
     private val maxBaseWidth = 900f * density // default page width on a wide landscape screen
-    private val maxPageWidthPt = pageSizes.maxOf { it.width }
+    private var maxPageWidthPt = sizes.maxOf { it.width }
 
     /** prefix[i] = total height (pt) of pages before page i. */
-    private val prefix = FloatArray(pageSizes.size + 1).also { p ->
-        pageSizes.forEachIndexed { i, s -> p[i + 1] = p[i] + s.height }
+    private var prefix = prefixOf(sizes)
+
+    private fun prefixOf(sizes: List<PageSize>) = FloatArray(sizes.size + 1).also { p ->
+        sizes.forEachIndexed { i, s -> p[i + 1] = p[i] + s.height }
+    }
+
+    /** Takes a new page list (e.g. a page added at the end) without moving what's on screen. */
+    fun updatePages(sizes: List<PageSize>) {
+        if (sizes.isEmpty()) return
+        prefix = prefixOf(sizes)
+        maxPageWidthPt = sizes.maxOf { it.width }
+        pageSizes = sizes
+        scrollX = clampX(scrollX)
+        scrollY = clampY(scrollY)
     }
 
     val pageCount: Int get() = pageSizes.size
@@ -150,6 +166,20 @@ class ViewerState(
     suspend fun animateZoomTo(target: Float, focus: Offset) {
         animate(zoom, target.coerceIn(minZoom, maxZoom), animationSpec = tween(280, easing = EaseOutSmooth)) { v, _ ->
             zoomBy(v / zoom, focus)
+        }
+        settle()
+    }
+
+    /** Scrolls so the spot ([x], [y], page points) on page [page] shows a third of the way down the screen. */
+    suspend fun animateToSpot(page: Int, x: Float, y: Float) {
+        val p = page.coerceIn(0, pageCount - 1)
+        val targetY = clampY(pageTop(p) + y * scale - viewport.height / 3f)
+        val targetX = clampX(pageLeft(p) + x * scale - viewport.width / 2f)
+        val startX = scrollX
+        val startY = scrollY
+        animate(0f, 1f, animationSpec = tween(380, easing = EaseOutSmooth)) { t, _ ->
+            scrollX = startX + (targetX - startX) * t
+            scrollY = startY + (targetY - startY) * t
         }
         settle()
     }

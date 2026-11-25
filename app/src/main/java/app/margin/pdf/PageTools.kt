@@ -8,6 +8,7 @@ import app.margin.data.Library
 import com.artifex.mupdf.fitz.Document
 import com.artifex.mupdf.fitz.Matrix
 import com.artifex.mupdf.fitz.PDFDocument
+import com.artifex.mupdf.fitz.PDFGraftMap
 import com.artifex.mupdf.fitz.android.AndroidDrawDevice
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -24,13 +25,17 @@ import kotlin.math.roundToInt
  * into the library; a PDF they came from stays as it is. Page ranges are 0-based and inclusive.
  */
 object PageTools {
-    /** Makes a new notebook (one page of [paper]; add more in the reader) and puts it at the top of the library. */
-    suspend fun createNotes(ctx: Context, title: String, paper: PageTemplate): Doc {
+    /**
+     * Makes a new notebook (one A4 page of [paper], upright or [landscape]) and puts it at the top of the
+     * library. Writing on its last page adds the next one, with the same paper.
+     */
+    suspend fun createNotes(ctx: Context, title: String, paper: PageTemplate, landscape: Boolean = false): Doc {
         val id = Library.newId()
-        PdfDoc.createBlank(PdfStore.copyFile(ctx, id), paper)
+        val (w, h) = if (landscape) PdfDoc.A4_HEIGHT to PdfDoc.A4_WIDTH else PdfDoc.A4_WIDTH to PdfDoc.A4_HEIGHT
+        PdfDoc.createBlank(PdfStore.copyFile(ctx, id), paper, w, h)
         val doc = Doc(
             id = id, uri = null, title = title.trim().ifEmpty { "Notes" }, pageCount = 1,
-            lastOpened = 0, added = System.currentTimeMillis(),
+            lastOpened = 0, added = System.currentTimeMillis(), paper = paper.name,
         )
         Library.get(ctx).addMade(listOf(doc))
         return doc
@@ -138,6 +143,113 @@ object PageTools {
         }
         library.addMade(made)
         return made
+    }
+
+    /** "Notes + 2 more": the suggested name for joining PDFs called [titles]. */
+    fun mergedTitle(titles: List<String>): String = when (titles.size) {
+        0 -> "Merged PDF"
+        1 -> titles[0]
+        else -> "${titles[0]} + ${titles.size - 1} more"
+    }
+
+    /**
+     * Joins [docs] (in this order, from Margin's up-to-date copies) into one new PDF called [title],
+     * with a contents entry where each one starts, and puts it at the top of the library. Your ink,
+     * text and pictures come along. [onProgress] gets how many PDFs are in so far.
+     */
+    suspend fun merge(ctx: Context, docs: List<Doc>, title: String, onProgress: (Int) -> Unit = {}): Doc {
+        val library = Library.get(ctx)
+        val sources = docs.map { PdfStore.prepare(ctx, it.id).file }
+        val id = Library.newId()
+        val out = PdfStore.copyFile(ctx, id)
+        val pages = try {
+            withContext(Mupdf.dispatcher) {
+                writeMerged(sources, docs.map { it.title }, out, library.thumbFile(id), onProgress)
+            }
+        } catch (t: Throwable) {
+            withContext(Dispatchers.IO + kotlinx.coroutines.NonCancellable) {
+                out.delete()
+                library.thumbFile(id).delete()
+            }
+            throw t
+        }
+        val doc = Doc(
+            id = id, uri = null, title = title.trim().ifEmpty { mergedTitle(docs.map { it.title }) }, pageCount = pages,
+            lastOpened = 0, added = System.currentTimeMillis(),
+        )
+        library.addMade(listOf(doc))
+        return doc
+    }
+
+    /** MuPDF thread only. Returns the number of pages written. */
+    private fun writeMerged(sources: List<File>, titles: List<String>, out: File, thumb: File, onProgress: (Int) -> Unit): Int {
+        val merged = PDFDocument()
+        try {
+            val starts = ArrayList<Int>()
+            sources.forEachIndexed { k, file ->
+                val src = Document.openDocument(file.path)
+                try {
+                    if (src.needsPassword()) throw PasswordProtectedException()
+                    val pdf = src as? PDFDocument ?: throw IOException("Not a PDF")
+                    starts += merged.countPages()
+                    val map = merged.newPDFGraftMap()
+                    try {
+                        for (i in 0 until pdf.countPages()) copyPage(merged, map, pdf, i)
+                    } finally {
+                        map.destroy()
+                    }
+                } finally {
+                    src.destroy()
+                }
+                onProgress(k + 1)
+            }
+            // Where each PDF starts, as the merged PDF's table of contents.
+            runCatching {
+                val contents = merged.outlineIterator()
+                titles.forEachIndexed { k, t -> contents.insert(t, "#page=${starts[k] + 1}", false) }
+                contents.destroy()
+            }
+            out.parentFile?.mkdirs()
+            val part = File(out.parentFile, out.name + ".part")
+            try {
+                merged.save(part.path, "garbage")
+                if (!part.renameTo(out)) throw IOException("Can't save the merged PDF")
+            } finally {
+                part.delete()
+            }
+            runCatching { saveThumb(merged, thumb) }
+            return merged.countPages()
+        } finally {
+            merged.destroy()
+        }
+    }
+
+    /**
+     * Copies page [i] of [src] to the end of [dst]: its look and its notes (ink, text, stamps, highlights).
+     * Links, form fields and pop-ups are left out: they point at pages and fields that don't come along.
+     * [src] is changed in memory only (it's never saved).
+     */
+    private fun copyPage(dst: PDFDocument, map: PDFGraftMap, src: PDFDocument, i: Int) {
+        val page = src.findPage(i)
+        val copy = dst.newDictionary()
+        copy.put("Type", dst.newName("Page"))
+        for (key in PdfDoc.PAGE_KEYS) PdfDoc.inherited(page, key)?.let { copy.put(key, map.graftObject(it)) }
+        val annots = page.get("Annots")
+        if (!annots.isNull && annots.isArray) {
+            val keep = dst.newArray()
+            for (k in 0 until annots.size()) {
+                val a = annots.get(k)
+                if (a.isNull || !a.isDictionary) continue
+                val sub = a.get("Subtype")
+                val type = if (sub.isName) sub.asName() else ""
+                if (type == "Link" || type == "Widget" || type == "Popup") continue
+                // These point back into the old PDF (its page, other annotations, form fields).
+                for (key in listOf("P", "Popup", "IRT", "Parent")) a.delete(key)
+                keep.push(map.graftObject(a))
+            }
+            if (keep.size() > 0) copy.put("Annots", keep)
+        }
+        dst.insertPage(dst.countPages(), dst.addObject(copy))
     }
 
     /** Writes pages [range] of [source] to [out] (plus a cover thumbnail). MuPDF thread only. */

@@ -33,6 +33,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
@@ -84,7 +87,7 @@ private fun PenType.label() = when (this) {
 }
 
 /**
- * The floating tool tray: real-looking pens that rise when picked, plus undo/redo.
+ * The floating tool tray: real-looking pens that rise when picked, the text tool, pictures, and undo/redo.
  * Tap a tool to pick it; tap it again for its options.
  */
 @Composable
@@ -93,6 +96,7 @@ fun PenTray(
     panel: TrayPanel?,
     onPanel: (TrayPanel?) -> Unit,
     onClearPage: () -> Unit,
+    onInsertImage: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var shown by remember { mutableStateOf(panel ?: TrayPanel.Pen) }
@@ -115,12 +119,12 @@ fun PenTray(
                 }
             }
         }
-        Tray(ink, panel, onPanel)
+        Tray(ink, panel, onPanel, onInsertImage)
     }
 }
 
 @Composable
-private fun Tray(ink: InkController, panel: TrayPanel?, onPanel: (TrayPanel?) -> Unit) {
+private fun Tray(ink: InkController, panel: TrayPanel?, onPanel: (TrayPanel?) -> Unit, onInsertImage: () -> Unit) {
     val c = Margin.colors
     fun tap(tool: Tool, options: TrayPanel?) {
         if (ink.tool == tool) onPanel(if (panel == null) options else null) else {
@@ -162,7 +166,10 @@ private fun Tray(ink: InkController, panel: TrayPanel?, onPanel: (TrayPanel?) ->
                 Instrument("Lasso", Color.Unspecified)
             }
             Box(Modifier.padding(horizontal = 8.dp).padding(bottom = 18.dp).size(1.dp, 40.dp).background(c.line))
-            Row(Modifier.padding(bottom = 16.dp)) {
+            Row(Modifier.padding(bottom = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                IconBtn(MIcons.Text, "Text", { tap(Tool.Text, null) }, active = ink.tool == Tool.Text)
+                IconBtn(MIcons.Picture, "Insert picture", onInsertImage)
+                Box(Modifier.padding(horizontal = 8.dp).size(1.dp, 32.dp).background(c.line))
                 IconBtn(MIcons.Undo, "Undo", { ink.undo() }, enabled = ink.canUndo)
                 IconBtn(MIcons.Redo, "Redo", { ink.redo() }, enabled = ink.canRedo)
             }
@@ -295,6 +302,20 @@ private fun HighlighterOptions(ink: InkController) {
         SizeSlider(style.size, 6f..24f) { v -> ink.highlighter = style.copy(size = v) }
         Label("Color")
         Swatches(HL_COLORS, style.color) { col -> ink.highlighter = style.copy(color = col) }
+        Row(
+            Modifier.padding(top = 14.dp).fillMaxWidth()
+                .toggleable(value = ink.snapHighlighter, role = Role.Switch) { ink.snapHighlighter = it },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Snap to text lines", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Margin.colors.text)
+                Text("A swipe over printed text becomes a neat highlight", fontSize = 12.sp, color = Margin.colors.textMuted)
+            }
+            Switch(
+                checked = ink.snapHighlighter, onCheckedChange = null,
+                colors = SwitchDefaults.colors(checkedTrackColor = Margin.colors.accent),
+            )
+        }
     }
 }
 

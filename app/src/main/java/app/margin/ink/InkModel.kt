@@ -97,8 +97,13 @@ object EraserMath {
     }
 }
 
-/** One undoable change: the strokes of some pages before and after. */
-class InkEdit(val before: Map<Int, List<InkStroke>>, val after: Map<Int, List<InkStroke>>)
+/** One undoable change: the strokes (and text boxes and images) of some pages before and after. */
+class InkEdit(
+    val before: Map<Int, List<InkStroke>>,
+    val after: Map<Int, List<InkStroke>>,
+    val itemsBefore: Map<Int, List<PageItem>> = emptyMap(),
+    val itemsAfter: Map<Int, List<PageItem>> = emptyMap(),
+)
 
 /** Undo / redo stack for one document. */
 class InkHistory(private val limit: Int = 200) {

@@ -41,6 +41,16 @@ object MIcons {
         "M6.5 3.5a2.75 2.75 0 1 0 0 5.5a2.75 2.75 0 1 0 0-5.5z M6.5 15a2.75 2.75 0 1 0 0 5.5a2.75 2.75 0 1 0 0-5.5z" +
             "M8.9 7.6L19.5 18 M8.9 16.4L19.5 6",
     )
+    val ChevronUp = line("M6 15l6-6 6 6")
+    val Bookmark = line("M7 4h10v16l-5-3.6L7 20z")
+    val BookmarkFilled = filled("M7 4h10v16l-5-3.6L7 20z")
+    val Duplicate = line("M9 9h10.5v10.5H9z M15 9V4.5H4.5V15H9")
+    val Rotate = line("M19 12a7 7 0 1 1-2.05-4.95 M19.5 4.5V8h-3.5")
+    val Text = line("M5.5 6V5h13v1 M12 5v14 M9.5 19h5")
+    val Picture = line("M4.5 5.5h15v13h-15z M4.5 15.5l4.5-4.5 4 4 2.5-2.5 4 4 M15.2 8.2a1.3 1.3 0 1 0 0 2.6a1.3 1.3 0 1 0 0-2.6z")
+    val Folder = line("M3.5 7.5A1.5 1.5 0 0 1 5 6h4l2 2h8a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5z")
+    val Sort = line("M4 7h16 M7 12h10 M10 17h4")
+    val Merge = line("M7 4v5l5 5v6 M17 4v5l-5 5 M9.5 17.5L12 20l2.5-2.5")
     val NewPage = line("M7 3.5h7l4.5 4.5v12.5H7z M14 3.5V8h4.5 M12.75 11v6 M9.75 14h6")
     val SaveFile = line("M7 3.5h7l4.5 4.5v12.5H7z M14 3.5V8h4.5 M12.75 11v6.5 M10 14.75l2.75 2.75 2.75-2.75")
 

@@ -90,6 +90,11 @@ import app.margin.update.Updater
 import app.margin.pdf.PdfStore
 import app.margin.pdf.pdfFileName
 import android.widget.Toast
+import android.text.format.Formatter
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.ui.semantics.selected
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
@@ -97,6 +102,11 @@ import kotlinx.coroutines.withContext
 
 private val thumbMemory = object : LruCache<String, ImageBitmap>(32 * 1024 * 1024) {
     override fun sizeOf(key: String, value: ImageBitmap) = value.width * value.height * 4
+}
+
+/** The cover of [id] changed (e.g. its first page moved): load it afresh next time. */
+fun forgetThumb(id: String) {
+    thumbMemory.remove(id)
 }
 
 @Composable
@@ -133,6 +143,21 @@ fun LibraryScreen(onOpen: (String) -> Unit) {
     // Saveable: the app may be stopped while the Files picker is open.
     var exportTargetId by rememberSaveable { mutableStateOf<String?>(null) }
     var showNewNotes by remember { mutableStateOf(false) }
+    var folder by rememberSaveable { mutableStateOf<String?>(null) }
+    var sortBy by rememberSaveable { mutableStateOf(SortBy.Recent) }
+    var renameTarget by remember { mutableStateOf<Doc?>(null) }
+    var folderTarget by remember { mutableStateOf<Doc?>(null) }
+    var mergeTarget by remember { mutableStateOf<Doc?>(null) }
+    var renameFolder by remember { mutableStateOf<String?>(null) }
+    // How much room each PDF takes (Margin's copy), for sorting by size.
+    val sizes = remember { mutableStateMapOf<String, Long>() }
+    LaunchedEffect(docs, sortBy) {
+        if (sortBy != SortBy.Size) return@LaunchedEffect
+        val found = withContext(Dispatchers.IO) { docs.associate { it.id to PdfStore.copyFile(ctx, it.id).length() } }
+        sizes.putAll(found)
+    }
+    val folders = remember(docs) { library.folders() }
+    if (folder != null && folder !in folders) folder = null
     val scope = rememberCoroutineScope()
     val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { to ->
         val d = exportTargetId?.let(library::get)
@@ -144,8 +169,16 @@ fun LibraryScreen(onOpen: (String) -> Unit) {
             }
         }
     }
-    val shown = remember(docs, query, starredOnly) {
-        docs.filter { (!starredOnly || it.starred) && (query.isBlank() || it.title.contains(query.trim(), ignoreCase = true)) }
+    val shown = remember(docs, query, starredOnly, folder, sortBy, sizes.toMap()) {
+        val list = docs.filter {
+            (!starredOnly || it.starred) && (folder == null || it.folder == folder) &&
+                (query.isBlank() || it.title.contains(query.trim(), ignoreCase = true))
+        }
+        when (sortBy) {
+            SortBy.Recent -> list.sortedByDescending { maxOf(it.lastOpened, it.added) }
+            SortBy.Name -> list.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.title })
+            SortBy.Size -> list.sortedByDescending { sizes[it.id] ?: 0L }
+        }
     }
     // The PDF you read last (PDFs Margin just made, never opened, don't count).
     val last = remember(docs) { docs.filter { it.lastOpened > 0 }.maxByOrNull { it.lastOpened } ?: docs.firstOrNull() }
@@ -175,7 +208,21 @@ fun LibraryScreen(onOpen: (String) -> Unit) {
                 }
             }
             item(key = "recent", span = full) {
-                RecentHeader(starredOnly) { starredOnly = it }
+                ShelfHeader(
+                    starredOnly = starredOnly,
+                    folder = folder,
+                    folders = folders,
+                    sortBy = sortBy,
+                    onAll = { starredOnly = false; folder = null },
+                    onStarred = { starredOnly = true; folder = null },
+                    onFolder = { starredOnly = false; folder = it },
+                    onRenameFolder = { renameFolder = it },
+                    onRemoveFolder = { f ->
+                        library.renameFolder(f, null)
+                        if (folder == f) folder = null
+                    },
+                    onSort = { sortBy = it },
+                )
             }
             items(shown, key = { it.id }) { d ->
                 DocCard(
@@ -183,6 +230,10 @@ fun LibraryScreen(onOpen: (String) -> Unit) {
                     thumb = rememberThumb(library, d.id),
                     onOpen = { onOpen(d.id) },
                     onToggleStar = { library.update(d.id) { it.copy(starred = !it.starred) } },
+                    meta = if (sortBy == SortBy.Size) sizes[d.id]?.let { Formatter.formatShortFileSize(ctx, it) } else null,
+                    onRename = { renameTarget = d },
+                    onMoveToFolder = { folderTarget = d },
+                    onMerge = if (docs.size > 1) ({ mergeTarget = d }) else null,
                     onPageTools = if (d.pageCount > 1) ({ toolsTarget = d }) else null,
                     onExport = {
                         exportTargetId = d.id
@@ -196,7 +247,12 @@ fun LibraryScreen(onOpen: (String) -> Unit) {
             if (shown.isEmpty()) {
                 item(key = "none", span = full) {
                     Text(
-                        if (starredOnly) "No starred PDFs yet. Long-press a PDF to star it." else "No PDFs match \"$query\".",
+                        when {
+                            query.isNotBlank() -> "No PDFs match \"$query\"."
+                            starredOnly -> "No starred PDFs yet. Long-press a PDF to star it."
+                            folder != null -> "No PDFs in \"$folder\"."
+                            else -> "No PDFs yet."
+                        },
                         color = c.textMuted, fontSize = 14.sp, modifier = Modifier.padding(vertical = 24.dp),
                     )
                 }
@@ -205,6 +261,32 @@ fun LibraryScreen(onOpen: (String) -> Unit) {
     }
 
     if (showSettings) SettingsDialog(onDismiss = { showSettings = false })
+    renameTarget?.let { d ->
+        RenameDialog("Rename PDF", d.title, onRename = { name ->
+            renameTarget = null
+            library.update(d.id) { it.copy(title = name) }
+        }, onDismiss = { renameTarget = null })
+    }
+    renameFolder?.let { f ->
+        RenameDialog("Rename folder", f, onRename = { name ->
+            renameFolder = null
+            library.renameFolder(f, name)
+            if (folder == f) folder = name
+        }, onDismiss = { renameFolder = null })
+    }
+    folderTarget?.let { d ->
+        FolderDialog(d, folders, onPick = { f ->
+            folderTarget = null
+            library.update(d.id) { it.copy(folder = f) }
+            Toast.makeText(ctx, if (f == null) "Taken out of its folder" else "Moved to \"$f\"", Toast.LENGTH_SHORT).show()
+        }, onDismiss = { folderTarget = null })
+    }
+    mergeTarget?.let { d ->
+        MergeDialog(d, docs, onMade = { made ->
+            mergeTarget = null
+            Toast.makeText(ctx, "Made \"${made.title}\" (${made.pageCount} pages)", Toast.LENGTH_SHORT).show()
+        }, onDismiss = { mergeTarget = null })
+    }
     if (showNewNotes) {
         NewNotesDialog(
             onCreated = { d ->
@@ -406,30 +488,102 @@ private fun EmptyState(onOpen: () -> Unit, onNewNotes: () -> Unit) {
     }
 }
 
+/** How the library grid is sorted. */
+enum class SortBy(val label: String) { Recent("Recent"), Name("Name"), Size("Size") }
+
+/** "Your PDFs" with filters (all, starred, each folder) and the sort order. Hold a folder to rename or remove it. */
 @Composable
-private fun RecentHeader(starredOnly: Boolean, onChange: (Boolean) -> Unit) {
+private fun ShelfHeader(
+    starredOnly: Boolean,
+    folder: String?,
+    folders: List<String>,
+    sortBy: SortBy,
+    onAll: () -> Unit,
+    onStarred: () -> Unit,
+    onFolder: (String) -> Unit,
+    onRenameFolder: (String) -> Unit,
+    onRemoveFolder: (String) -> Unit,
+    onSort: (SortBy) -> Unit,
+) {
+    val c = Margin.colors
+    var sortMenu by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth().padding(top = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Text("Recent", color = Margin.colors.text, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(end = 8.dp))
-        Chip("All", selected = !starredOnly) { onChange(false) }
-        Chip("Starred", selected = starredOnly) { onChange(true) }
+        Text("Your PDFs", color = c.text, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(end = 8.dp))
+        Row(
+            Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Chip("All", selected = !starredOnly && folder == null, onClick = onAll)
+            Chip("Starred", selected = starredOnly, onClick = onStarred)
+            folders.forEach { f ->
+                var menu by remember { mutableStateOf(false) }
+                Box {
+                    Chip(f, selected = folder == f, icon = MIcons.Folder, onClick = { onFolder(f) }, onLongClick = { menu = true })
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Rename folder…") },
+                            leadingIcon = { Icon(MIcons.Nib, contentDescription = null) },
+                            onClick = { menu = false; onRenameFolder(f) },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Remove folder (keeps its PDFs)") },
+                            leadingIcon = { Icon(MIcons.Close, contentDescription = null) },
+                            onClick = { menu = false; onRemoveFolder(f) },
+                        )
+                    }
+                }
+            }
+        }
+        Box {
+            Row(
+                Modifier.height(36.dp).clip(CircleShape).clickable(onClickLabel = "Sort") { sortMenu = true }.padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Icon(MIcons.Sort, contentDescription = null, tint = c.textMuted, modifier = Modifier.size(18.dp))
+                Text(sortBy.label, color = c.textMuted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            }
+            DropdownMenu(expanded = sortMenu, onDismissRequest = { sortMenu = false }) {
+                SortBy.entries.forEach { o ->
+                    DropdownMenuItem(
+                        text = { Text(if (o == SortBy.Recent) "Recently opened" else if (o == SortBy.Name) "Name" else "Size") },
+                        leadingIcon = { if (o == sortBy) Icon(MIcons.Check, contentDescription = null) },
+                        onClick = { sortMenu = false; onSort(o) },
+                    )
+                }
+            }
+        }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun Chip(text: String, selected: Boolean, onClick: () -> Unit) {
+private fun Chip(
+    text: String,
+    selected: Boolean,
+    icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
+    onLongClick: (() -> Unit)? = null,
+    onClick: () -> Unit,
+) {
     val c = Margin.colors
     val bg by animateColorAsState(if (selected) c.text else c.surfaceAlt, tween(200), label = "chipBg")
     val fg by animateColorAsState(if (selected) c.background else c.textMuted, tween(200), label = "chipFg")
-    Box(
+    Row(
         Modifier.height(36.dp).clip(CircleShape).background(bg)
-            .selectable(selected = selected, role = Role.Tab, onClick = onClick)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick, onLongClickLabel = onLongClick?.let { "Folder options" })
+            .semantics { this.selected = selected }
             .padding(horizontal = 16.dp),
-        contentAlignment = Alignment.Center,
-    ) { Text(text, color = fg, fontSize = 13.sp, fontWeight = FontWeight.SemiBold) }
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        if (icon != null) Icon(icon, contentDescription = null, tint = fg, modifier = Modifier.size(16.dp))
+        Text(text, color = fg, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+    }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -439,6 +593,10 @@ private fun DocCard(
     thumb: ImageBitmap?,
     onOpen: () -> Unit,
     onToggleStar: () -> Unit,
+    meta: String?,
+    onRename: () -> Unit,
+    onMoveToFolder: () -> Unit,
+    onMerge: (() -> Unit)?,
     onPageTools: (() -> Unit)?,
     onExport: () -> Unit,
     onRestore: (() -> Unit)?,
@@ -477,11 +635,28 @@ private fun DocCard(
                     leadingIcon = { Icon(MIcons.Star, contentDescription = null) },
                     onClick = { menu = false; onToggleStar() },
                 )
+                DropdownMenuItem(
+                    text = { Text("Rename…") },
+                    leadingIcon = { Icon(MIcons.Nib, contentDescription = null) },
+                    onClick = { menu = false; onRename() },
+                )
+                DropdownMenuItem(
+                    text = { Text("Move to folder…") },
+                    leadingIcon = { Icon(MIcons.Folder, contentDescription = null) },
+                    onClick = { menu = false; onMoveToFolder() },
+                )
                 if (onPageTools != null) {
                     DropdownMenuItem(
                         text = { Text("Extract or split pages…") },
                         leadingIcon = { Icon(MIcons.Scissors, contentDescription = null) },
                         onClick = { menu = false; onPageTools() },
+                    )
+                }
+                if (onMerge != null) {
+                    DropdownMenuItem(
+                        text = { Text("Merge with other PDFs…") },
+                        leadingIcon = { Icon(MIcons.Merge, contentDescription = null) },
+                        onClick = { menu = false; onMerge() },
                     )
                 }
                 DropdownMenuItem(
@@ -505,8 +680,8 @@ private fun DocCard(
         }
         Column(Modifier.padding(horizontal = 2.dp)) {
             Text(doc.title, color = c.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, lineHeight = 19.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            val meta = if (doc.pageCount > 0) "${doc.pageCount} pages · ${openedText(doc)}" else openedText(doc)
-            Text(meta, color = c.textMuted, fontSize = 12.sp)
+            val info = meta ?: openedText(doc)
+            Text(if (doc.pageCount > 0) "${doc.pageCount} pages · $info" else info, color = c.textMuted, fontSize = 12.sp)
         }
     }
 }
