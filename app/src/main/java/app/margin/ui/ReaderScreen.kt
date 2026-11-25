@@ -172,7 +172,7 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
             error = "Couldn't open this PDF."
         }
     }
-    // ---- Saving your ink into the PDF file itself (Margin's copy, and the original when it can) ----
+    // ---- Saving your ink into the PDF file itself (Margin's copy; your original file is never changed) ----
     var saveState by remember(docId) { mutableStateOf<PdfStore.Result?>(null) }
     var saving by remember(docId) { mutableStateOf(false) }
     suspend fun saveIntoFile() {
@@ -183,7 +183,7 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
         val r = PdfStore.save(ctx, docId, doc, ink.forPdf())
         saving = false
         saveState = r
-        if (r == PdfStore.Result.Saved || r == PdfStore.Result.SavedCopyOnly) ink.markWrittenToPdf(v)
+        if (r == PdfStore.Result.Saved) ink.markWrittenToPdf(v)
     }
     // After 20 quiet seconds...
     LaunchedEffect(ink.version, pdf) {
@@ -274,7 +274,6 @@ fun ReaderScreen(docId: String, onBack: () -> Unit) {
                 ink.pdfDirty && saveState == PdfStore.Result.Failed -> "Not saved yet"
                 ink.pdfDirty -> null
                 saveState == PdfStore.Result.Saved -> "Saved"
-                saveState == PdfStore.Result.SavedCopyOnly -> "Saved in Margin (the original file can't be updated)"
                 else -> null
             },
             pagesOpen = showPages,

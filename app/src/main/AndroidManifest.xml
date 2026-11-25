@@ -1,11 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Only used to check GitHub for a newer build. -->
-    <uses-permission android:name="android.permission.INTERNET" />
+    <!--
+        Privacy: your PDFs, notes and ink never leave the tablet unless you Share them or
+        Save a copy yourself.
+        - No internet access at all, so Android itself stops Margin from sending anything.
+          (tools:node="remove" also strips it if a library ever asks for it.)
+        - No Android backup to Google Drive and no device-to-device transfer of Margin's data.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
 
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"

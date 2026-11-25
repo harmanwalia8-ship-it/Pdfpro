@@ -24,7 +24,6 @@ import app.margin.ui.EaseOutSmooth
 import app.margin.ui.LibraryScreen
 import app.margin.ui.MarginTheme
 import app.margin.ui.ReaderScreen
-import app.margin.update.Updater
 
 class MainActivity : ComponentActivity() {
     /** A PDF handed to us by another app ("Open with Margin"), waiting to be shown. */
@@ -39,7 +38,6 @@ class MainActivity : ComponentActivity() {
                 App(incoming = incoming, onIncomingShown = { incoming = null })
             }
         }
-        Updater.check(this)
         PdfStore.keepMissingCopies(this)
     }
 

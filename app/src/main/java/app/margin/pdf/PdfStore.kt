@@ -20,12 +20,15 @@ import java.io.FileNotFoundException
 import java.io.IOException
 
 /**
- * Margin's own copy of every PDF in the library (`files/docs/<id>.pdf`), kept in step with the original:
+ * Margin's own copy of every PDF in the library (`files/docs/<id>.pdf`). Margin only ever reads your
+ * original files; it never writes to them, so your notes can't leave the app through them (e.g. a
+ * PDF that lives in Google Drive would upload whatever is written into it).
  *
- * - Opening refreshes the copy from the original when Margin can read it, and otherwise
- *   (the original was deleted, moved, or Margin lost access) simply opens the copy.
- * - Saving writes your ink into the copy and, when it can, into the original too, so other apps show it.
- *   Before the first save the untouched PDF is kept as a backup, so it can be restored.
+ * - Opening refreshes the copy from the original while you haven't changed the PDF in Margin, and
+ *   otherwise (you have, or the original was deleted, moved, or Margin lost access) opens the copy.
+ * - Saving writes your ink (and page changes) into Margin's copy only. Before the first save the
+ *   untouched PDF is kept as a backup, so it can be restored.
+ * - Your ink only leaves Margin when you Share a PDF or Save a copy to Files.
  * - Deleting a PDF from Margin removes the copy and everything else Margin keeps for it.
  *
  * Files are replaced by renaming a finished file over them, so a reader never sees half a file
@@ -33,10 +36,8 @@ import java.io.IOException
  */
 object PdfStore {
     enum class Result {
-        /** Saved into Margin's copy and the original (or there is no original). */
+        /** Saved into Margin's copy. */
         Saved,
-        /** Saved into Margin's copy; the original is read-only or gone. */
-        SavedCopyOnly,
         /** Not a PDF Margin can write. */
         ReadOnly,
         Failed,
@@ -67,7 +68,7 @@ object PdfStore {
                     if (!copy.exists()) throw FileNotFoundException("Margin's copy is missing")
                     Opened(copy, originalMissing = false)
                 }
-                // The original doesn't have Margin's latest changes; reading it again would lose them.
+                // You've changed the PDF in Margin; reading the original again would lose that.
                 doc.copyAhead && copy.exists() -> Opened(copy, originalMissing = !originalExists(ctx, uri))
                 else -> try {
                     copyFromOriginal(ctx, uri, copy)
@@ -81,7 +82,7 @@ object PdfStore {
     }
 
     /**
-     * Writes [ink] (and any page changes) into Margin's copy and, when it can, into the original file.
+     * Writes [ink] (and any page changes) into Margin's copy. The original file is never written to.
      * Before the first save, the untouched PDF is kept as a backup.
      */
     suspend fun save(ctx: Context, docId: String, pdf: PdfDoc, ink: Map<Int, List<InkForPdf>>): Result = lock.withLock {
@@ -97,11 +98,10 @@ object PdfStore {
                     // First time Margin writes into this PDF: keep the untouched one.
                     replace(backup) { out -> copy.inputStream().use { it.copyTo(out) } }
                 }
-                val uri = doc.uri?.let(Uri::parse)
-                val wroteOriginal = uri != null && runCatching { writeTo(ctx, uri, part) }.isSuccess
                 if (!part.renameTo(copy)) throw IOException("Can't update Margin's copy")
-                library.update(docId) { it.copy(copyAhead = uri != null && !wroteOriginal) }
-                if (uri == null || wroteOriginal) Result.Saved else Result.SavedCopyOnly
+                // From now on Margin's copy is the one to open; the original doesn't have your changes.
+                if (doc.uri != null && !doc.copyAhead) library.update(docId) { it.copy(copyAhead = true) }
+                Result.Saved
             }
         } catch (e: CancellationException) {
             throw e
@@ -112,7 +112,7 @@ object PdfStore {
         }
     }
 
-    /** Puts the untouched PDF back, in Margin's copy and (if it can) the original, and clears your ink. */
+    /** Puts the untouched PDF back into Margin's copy and clears your ink. (The original was never changed.) */
     suspend fun restore(ctx: Context, docId: String): Boolean = lock.withLock {
         withContext(Dispatchers.IO) {
             val library = Library.get(ctx)
@@ -121,19 +121,21 @@ object PdfStore {
             if (!backup.exists()) return@withContext false
             runCatching {
                 replace(copyFile(ctx, docId)) { out -> backup.inputStream().use { it.copyTo(out) } }
-                val uri = doc.uri?.let(Uri::parse)
-                val wroteOriginal = uri != null && runCatching { writeTo(ctx, uri, backup) }.isSuccess
-                library.update(docId) { it.copy(copyAhead = uri != null && !wroteOriginal) }
+                // Keep opening the restored copy: an original written by an older Margin may still hold ink.
+                if (doc.uri != null) library.update(docId) { it.copy(copyAhead = true) }
                 library.inkFile(docId).delete()
                 backup.delete()
             }.isSuccess
         }
     }
 
-    /** Writes the PDF (as Margin has it, with your ink) to [to], e.g. a new file in Files. */
+    /** Writes the PDF (as Margin has it, with your ink) to [to]: a new file you picked in "Save a copy to Files". */
     suspend fun export(ctx: Context, docId: String, to: Uri): Boolean = runCatching {
         val file = prepare(ctx, docId).file
-        withContext(Dispatchers.IO) { writeTo(ctx, to, file) }
+        withContext(Dispatchers.IO) {
+            val out = ctx.contentResolver.openOutputStream(to, "wt") ?: throw IOException("Can't write this file")
+            out.use { o -> file.inputStream().use { it.copyTo(o) } }
+        }
     }.isSuccess
 
     /**
@@ -212,11 +214,6 @@ object PdfStore {
             ctx.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { it.moveToFirst() } ?: false
         }
     }.getOrDefault(false)
-
-    private fun writeTo(ctx: Context, uri: Uri, from: File) {
-        val out = ctx.contentResolver.openOutputStream(uri, "wt") ?: throw IOException("Can't write this file")
-        out.use { o -> from.inputStream().use { it.copyTo(o) } }
-    }
 }
 
 /** A safe file name for a PDF called [title] ("Notes: week 3" -> "Notes_ week 3.pdf"). */

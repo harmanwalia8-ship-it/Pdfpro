@@ -39,8 +39,8 @@ data class Doc(
     /** When Margin made this PDF (0 for PDFs you opened). */
     val added: Long = 0,
     /**
-     * Margin's copy has changes the original couldn't take (it's read-only or gone),
-     * so Margin opens its copy instead of reading the original again.
+     * You've changed this PDF in Margin (ink, pages), which only goes into Margin's copy, so Margin
+     * opens its copy instead of reading the original again.
      */
     val copyAhead: Boolean = false,
 )
@@ -66,11 +66,9 @@ class Library private constructor(private val ctx: Context) {
 
     /** Adds (or refreshes) a PDF picked by the user and returns its entry. */
     fun add(uri: Uri): Doc {
+        // Read access only: Margin never writes to your original files.
         runCatching {
             ctx.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        runCatching {
-            ctx.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
         }
         val id = idFor(uri)
         val existing = get(id)

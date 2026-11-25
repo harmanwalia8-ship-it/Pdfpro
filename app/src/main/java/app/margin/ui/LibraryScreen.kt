@@ -120,7 +120,6 @@ fun LibraryScreen(onOpen: (String) -> Unit) {
     val c = Margin.colors
     val library = remember { Library.get(ctx) }
     val docs by library.docs.collectAsStateWithLifecycle()
-    val update by Updater.status.collectAsStateWithLifecycle()
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) onOpen(library.add(uri).id)
     }
@@ -162,10 +161,6 @@ fun LibraryScreen(onOpen: (String) -> Unit) {
     ) {
         item(key = "header", span = full) {
             Header(query, { query = it }, { showSettings = true })
-        }
-        val u = update
-        if (u is Updater.Status.Available) {
-            item(key = "update", span = full) { UpdateBanner(u, Modifier.animateItem()) }
         }
         if (last == null) {
             item(key = "empty", span = full) { EmptyState(openPicker, onNewNotes = { showNewNotes = true }) }
@@ -318,30 +313,6 @@ private fun Header(query: String, onQuery: (String) -> Unit, onSettings: () -> U
             }
         }
         IconBtn(MIcons.Settings, "Settings and updates", onSettings)
-    }
-}
-
-@Composable
-private fun UpdateBanner(status: Updater.Status.Available, modifier: Modifier = Modifier) {
-    val c = Margin.colors
-    val ctx = LocalContext.current
-    Row(
-        modifier.fillMaxWidth().background(c.accentSoft, RoundedCornerShape(16.dp)).padding(horizontal = 20.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(14.dp),
-    ) {
-        Icon(MIcons.Download, contentDescription = null, tint = c.accent)
-        Column(Modifier.weight(1f)) {
-            Text("A new version of Margin is ready", color = c.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            Text(
-                "Build ${status.build} · you have build ${Updater.currentBuild}. It downloads in Chrome; tap the download to install.",
-                color = c.textMuted, fontSize = 13.sp,
-            )
-        }
-        Button(
-            onClick = { Updater.openDownload(ctx) },
-            colors = ButtonDefaults.buttonColors(containerColor = c.accent, contentColor = c.onAccent),
-        ) { Text("Download", fontWeight = FontWeight.SemiBold) }
     }
 }
 
@@ -562,7 +533,6 @@ private fun Cover(image: ImageBitmap?, modifier: Modifier, shape: RoundedCornerS
 private fun SettingsDialog(onDismiss: () -> Unit) {
     val c = Margin.colors
     val ctx = LocalContext.current
-    val status by Updater.status.collectAsStateWithLifecycle()
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = c.surface,
@@ -570,24 +540,19 @@ private fun SettingsDialog(onDismiss: () -> Unit) {
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Text("Version ${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE})", color = c.textMuted, fontSize = 14.sp)
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    val s = status
-                    OutlinedButton(
-                        onClick = { Updater.check(ctx, force = true) },
-                        enabled = s !is Updater.Status.Checking,
-                    ) { Text("Check for updates") }
-                    Text(
-                        when (s) {
-                            Updater.Status.Checking -> "Checking…"
-                            Updater.Status.UpToDate -> "You're up to date"
-                            is Updater.Status.Available -> "Build ${s.build} is available"
-                            is Updater.Status.Failed -> s.message
-                            Updater.Status.Idle -> ""
-                        },
-                        color = c.textMuted, fontSize = 13.sp,
-                    )
-                }
-                Text("Updates come from github.com/${BuildConfig.UPDATE_REPO}", color = c.textMuted, fontSize = 12.sp)
+                OutlinedButton(onClick = { Updater.openReleases(ctx) }) { Text("Check for updates") }
+                Text(
+                    "Opens the newest release on GitHub in Chrome. If its build number is higher than " +
+                        "${BuildConfig.VERSION_CODE}, download the APK there and tap it to install.",
+                    color = c.textMuted, fontSize = 13.sp,
+                )
+                Text("Privacy", color = c.text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Margin has no internet access and isn't included in Android backups. Your PDFs, notes " +
+                        "and ink stay on this tablet, and Margin never changes your original files. They only " +
+                        "leave when you choose Share or Save a copy to Files.",
+                    color = c.textMuted, fontSize = 13.sp,
+                )
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },

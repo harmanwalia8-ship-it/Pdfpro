@@ -57,6 +57,7 @@ class SmokeTest {
     @Test
     fun libraryReaderAndGestures() {
         val pdf = samplePdf(File(ctx.filesDir, "Sample Notes.pdf"), pages = 6)
+        val untouched = pdf.readBytes() // Margin must never change the original file
 
         ActivityScenario.launch(MainActivity::class.java).use {
             compose.onNodeWithText("Open your first PDF").assertExists()
@@ -208,22 +209,23 @@ class SmokeTest {
             settle(1500)
             shot("11-library-after-reading")
 
-            // ---- Leaving the PDF saved the ink into the file itself, with a backup of the original ----
+            // ---- Leaving the PDF saved the ink into Margin's copy (with a backup), never into the original ----
+            val id = Library.idFor(Uri.fromFile(pdf))
+            val copy = File(ctx.filesDir, "docs/$id.pdf")
             val end = SystemClock.uptimeMillis() + 15_000
             var text = ""
             while (SystemClock.uptimeMillis() < end) {
-                text = String(pdf.readBytes(), Charsets.ISO_8859_1)
+                text = if (copy.exists()) String(copy.readBytes(), Charsets.ISO_8859_1) else ""
                 if (text.contains("Margin") && text.contains("/Ink")) break
                 Thread.sleep(500)
             }
-            check(text.contains("Margin") && text.contains("/Ink")) { "The ink wasn't saved into the PDF file" }
-            val backup = File(ctx.filesDir, "originals/${Library.idFor(Uri.fromFile(pdf))}.pdf")
+            check(text.contains("Margin") && text.contains("/Ink")) { "The ink wasn't saved into Margin's copy of the PDF" }
+            check(pdf.readBytes().contentEquals(untouched)) { "Margin changed the original file; it must only ever read it" }
+            val backup = File(ctx.filesDir, "originals/$id.pdf")
             check(backup.exists()) { "No backup of the original was kept" }
             check(!String(backup.readBytes(), Charsets.ISO_8859_1).contains("Margin")) { "The backup isn't the untouched original" }
 
             // ---- Margin keeps its own copy: the PDF still opens after the original is deleted ----
-            val id = Library.idFor(Uri.fromFile(pdf))
-            check(File(ctx.filesDir, "docs/$id.pdf").exists()) { "Margin didn't keep its own copy of the PDF" }
             check(pdf.delete()) { "Couldn't delete the original PDF for the test" }
             compose.onNodeWithText("Continue").performClick()
             waitForText("Can't find the original file · showing Margin's copy")

@@ -52,6 +52,16 @@ jobs:
           BUILD_NUMBER: ${{ github.run_number }}
         run: ./gradlew --no-daemon :app:assembleRelease
 
+      # Privacy: the finished app must not be able to use the internet (Android enforces this).
+      - name: Check the APK has no internet access
+        run: |
+          AAPT2=$(ls "$ANDROID_HOME"/build-tools/*/aapt2 | sort -V | tail -1)
+          "$AAPT2" dump permissions app/build/outputs/apk/release/app-release.apk | tee permissions.txt
+          if grep -q "android.permission.INTERNET" permissions.txt; then
+            echo "::error::The APK asks for internet access. Margin must never be able to send your data anywhere."
+            exit 1
+          fi
+
       - name: Keep the APK with this run
         uses: actions/upload-artifact@v6
         with:
